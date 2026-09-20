@@ -65,7 +65,8 @@ int main(int argc, char** argv) {
         session.resetScripts();
         check(session.runString("assert(survivor == nil); emu:runFrame(); assert(calls == nil)"),
               "Scripting reset retained callbacks");
-        check(session.paths("effective").at("sd") == dir + "/override.img", "Scripting reset lost path override");
+        check(session.paths("effective").at("sd") == ScriptSession::absolutePath(dir + "/override.img"),
+              "Scripting reset lost path override");
         // Held physical controls survive script ownership changes.
         session.core->input.pressKey(0);
         session.core->input.pressHome();
@@ -182,7 +183,9 @@ int main(int argc, char** argv) {
                         ++reads;
                     }
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                // A 1 ms sleep can take a full Windows timer tick. This probe
+                // checks lock independence, so yield without throttling reads.
+                std::this_thread::yield();
             }
         });
         bool responsive =

@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='3beans-scripting-') as directory:
     directory = root.as_posix()
     for name in ('boot9.bin', 'boot11.bin'):
         (root / name).write_bytes(struct.pack('<I', 0xEAFFFFFE) * (0x10000 // 4))
-    for index, name in enumerate(('override.img', 'second.img', 'saved.img'), 1):
+    for index, name in ((1, 'override.img'), (2, 'second.img'), (3, 'saved.img'), (2, 'preflight.img')):
         (root / name).write_bytes(struct.pack('<H', index * 0x1111) + bytes(4094))
     (root / 'nand.bin').write_bytes(bytes(0x20000))
     ini = 'sdPath=saved.img\nboot9Path=missing9\nboot11Path=missing11\nnandPath=missingnand\ngpuRenderer=1\nthreadedGpu=1\nfpsLimiter=1\n'

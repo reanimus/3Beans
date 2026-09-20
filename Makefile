@@ -39,6 +39,9 @@ OFILES := $(patsubst %.cpp,$(BUILD)/%.o,$(CPPFILES))
 
 ifeq ($(OS),Windows_NT)
   OFILES += $(BUILD)/icon-windows.o
+  # MinGW LTO can discard inline wxWidgets virtual thunks referenced by its
+  # static libraries. Compile the desktop normally; keep LTO for the core.
+  $(BUILD)/src/desktop/%.o: ARGS := $(filter-out -flto%,$(ARGS))
 endif
 
 all: $(NAME)

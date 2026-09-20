@@ -4,6 +4,10 @@ local a = emu:getCPU(C.CPU.ARM11A)
 local b = emu:getCPU(C.CPU.ARM11B)
 local n = emu:getCPU(C.CPU.ARM9)
 local function fails(fn) assert(not pcall(fn)) end
+local function normalizedPath(path)
+    if package.config:sub(1, 1) == '\\' then return (path:gsub('\\', '/')) end
+    return path
+end
 fails(function() emu:read8(0) end)
 local starts, resets, frames = 0, 0, 0
 callbacks:add('start', function() starts = starts + 1 end)
@@ -13,7 +17,7 @@ emu:start()
 assert(starts == 1 and emu:currentFrame() == 0)
 assert(a:readRegister('pc') == 0x10000)
 assert(n:readRegister('pc') == 0xFFFF0000)
-assert(emu:getPaths().mounted.sd == TESTDIR .. '/override.img')
+assert(normalizedPath(emu:getPaths().mounted.sd) == TESTDIR .. '/override.img')
 fails(function() emu:getCPU('bad') end)
 fails(function() emu:getCPU('ARM11C'):step() end)
 fails(function() emu:write32(-1, 0) end)
@@ -195,18 +199,21 @@ a:clearBreakpoint(thumb)
 
 -- Overrides are pending until reboot, persist across resets, and can be cleared.
 emu:setPathOverride('sd', TESTDIR .. '/second.img')
-assert(emu:getPaths().mounted.sd == TESTDIR .. '/override.img')
-assert(emu:getPaths().effective.sd == TESTDIR .. '/second.img')
+assert(normalizedPath(emu:getPaths().mounted.sd) == TESTDIR .. '/override.img')
+assert(normalizedPath(emu:getPaths().effective.sd) == TESTDIR .. '/second.img')
 emu:reset()
 print('override reset passed')
 assert(resets == 1 and emu:currentFrame() == 0)
-assert(emu:getPaths().mounted.sd == TESTDIR .. '/second.img')
+assert(normalizedPath(emu:getPaths().mounted.sd) == TESTDIR .. '/second.img')
 assert(retained:read32(0x3000) == 0) -- stale handle resolves to the new core
 assert(emu:getKeys() == 0)
 print('preparing failed reset')
-os.rename(TESTDIR .. '/second.img', TESTDIR .. '/moved.img')
+-- Windows cannot rename the mounted image. Invalidate an unmounted pending
+-- override instead, and verify that failed preflight preserves the old core.
+emu:setPathOverride('sd', TESTDIR .. '/preflight.img')
+assert(os.rename(TESTDIR .. '/preflight.img', TESTDIR .. '/moved.img'))
 fails(function() emu:reset() end)
-assert(emu:currentFrame() == 0 and emu:getPaths().mounted.sd == TESTDIR .. '/second.img')
+assert(emu:currentFrame() == 0 and normalizedPath(emu:getPaths().mounted.sd) == TESTDIR .. '/second.img')
 print('failed reset preserved core')
 emu:clearPathOverride('sd'); emu:reset()
 assert(resets == 2 and emu:getPaths().mounted.sd == 'saved.img')
