@@ -23,13 +23,17 @@
 #include <cstdint>
 #include <queue>
 #include <mutex>
+#include <vector>
+#include <memory>
 
 class Core;
 
 class Pdc {
 public:
     Pdc(Core &core): core(core) {}
+    ~Pdc() = default;
     uint32_t *getFrame();
+    std::vector<uint32_t> latestFrame();
     void drawFrame();
 
     uint32_t readFramebufLt0(int i) { return pdcFramebufLt0[i]; }
@@ -49,7 +53,8 @@ public:
 private:
     Core &core;
 
-    std::queue<uint32_t*> buffers;
+    std::queue<std::shared_ptr<std::vector<uint32_t>>> buffers;
+    std::shared_ptr<std::vector<uint32_t>> latest;
     std::atomic<bool> ready{false};
     std::mutex mutex;
     uint32_t screenBases[2] = {};

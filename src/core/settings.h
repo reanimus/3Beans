@@ -49,6 +49,6 @@ namespace Settings {
     extern std::string basePath;
 
     void add(std::vector<Setting> &extra);
-    bool load(std::string path = ".");
+    bool load(std::string path = ".", bool createDefaults = true);
     bool save();
 };

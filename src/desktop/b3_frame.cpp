@@ -24,6 +24,8 @@
 #include "hardware_dialog.h"
 #include "input_dialog.h"
 #include "path_dialog.h"
+#include "b3_app.h"
+#include "../scripting/cli.h"
 
 enum FrameEvent {
     INSERT_CART = 1,
@@ -40,7 +42,8 @@ enum FrameEvent {
     GPU_SETTINGS,
     PATH_SETTINGS,
     INPUT_BINDINGS,
-    UPDATE_JOYSTICK
+    UPDATE_JOYSTICK,
+    SCRIPTING
 };
 
 wxBEGIN_EVENT_TABLE(b3Frame, wxFrame)
@@ -59,15 +62,17 @@ EVT_MENU(GPU_SETTINGS, b3Frame::gpuSettings)
 EVT_MENU(PATH_SETTINGS, b3Frame::pathSettings)
 EVT_MENU(INPUT_BINDINGS, b3Frame::inputBindings)
 EVT_TIMER(UPDATE_JOYSTICK, b3Frame::updateJoystick)
+EVT_MENU(SCRIPTING, b3Frame::scripting)
 EVT_CLOSE(b3Frame::close)
 wxEND_EVENT_TABLE()
 
-b3Frame::b3Frame(): wxFrame(nullptr, wxID_ANY, "3Beans") {
+b3Frame::b3Frame(): wxFrame(nullptr, wxID_ANY, "3Beans"), session(false), mutex(session.mutex) {
     // Set up the file menu
     fileMenu = new wxMenu();
     fileMenu->Append(INSERT_CART, "&Insert Cart ROM");
     fileMenu->Append(EJECT_CART, "&Eject Cart ROM");
     fileMenu->AppendSeparator();
+    fileMenu->Append(SCRIPTING, "&Scripting...");
     fileMenu->Append(QUIT, "&Quit");
     fileMenu->Enable(EJECT_CART, false);
 
@@ -102,7 +107,9 @@ b3Frame::b3Frame(): wxFrame(nullptr, wxID_ANY, "3Beans") {
     SetMenuBar(menuBar);
 
     // Set up and show the window
-    stopCore(true);
+    systemMenu->SetLabel(RESTART, "&Start");
+    systemMenu->Enable(PAUSE, false);
+    systemMenu->Enable(STOP, false);
     SetClientSize(MIN_SIZE);
     SetBackgroundColour(*wxBLACK);
     Centre();
@@ -135,7 +142,7 @@ b3Frame::b3Frame(): wxFrame(nullptr, wxID_ANY, "3Beans") {
     joystick = new wxJoystick();
     if (joystick->IsOk()) {
         // Initialize data and start the joystick update timer
-        axisBases.reserve(joystick->GetNumberAxes());
+        axisBases.resize(joystick->GetNumberAxes());
         timer = new wxTimer(this, UPDATE_JOYSTICK);
         timer->Start(10);
     }
@@ -145,86 +152,89 @@ b3Frame::b3Frame(): wxFrame(nullptr, wxID_ANY, "3Beans") {
         joystick = nullptr;
         timer = nullptr;
     }
+    session.context = glSupport ? &((b3CanvasOgl*)canvas)->contextFunc : nullptr;
+    session.changed = [this] { uiCore = bool(session.core); uiFps = 0; };
+    session.output = [this](const std::string &text) {
+        auto *event = new wxThreadEvent(wxEVT_THREAD);
+        event->SetString(wxString::FromUTF8(text)); event->SetInt(0); wxQueueEvent(this, event);
+    };
+    session.bufferOutput = [this](const std::string &name, const std::string &text) {
+        auto *event = new wxThreadEvent(wxEVT_THREAD);
+        event->SetString(wxString::FromUTF8(text)); event->SetInt(1);
+        event->SetPayload(name); wxQueueEvent(this, event);
+    };
+    Bind(wxEVT_THREAD, &b3Frame::scriptMessage, this);
+    thread = new std::thread(&b3Frame::runCore, this);
+    enqueue([this] {
+        launchOptions.apply(session);
+        for (auto &path : launchOptions.scripts) if (!session.runFile(path)) break;
+    });
 }
 
 void b3Frame::Refresh() {
-    // Override the refresh function and enforce minimum frame size
     wxFrame::Refresh();
     SetMinClientSize(MIN_SIZE);
-
-    // Display current FPS in the title bar if running
+    running.store(session.autoRun.load());
     wxString label = "3Beans";
-    mutex.lock();
-    if (running.load())
-        label += wxString::Format(" - %d FPS", core->fps);
-    mutex.unlock();
-    SetLabel(label);
+    if (uiCore.load() && running.load()) label += wxString::Format(" - %d FPS", uiFps.load());
+    if (uiOverrides.load()) label += " - Temporary boot paths";
+    systemMenu->SetLabel(PAUSE, running.load() ? "&Pause" : "&Resume");
+    systemMenu->SetLabel(RESTART, uiCore.load() ? "&Restart" : "&Start");
+    systemMenu->Enable(PAUSE, uiCore.load());
+    systemMenu->Enable(STOP, uiCore.load());
+    SetTitle(label);
+}
+
+void b3Frame::enqueue(std::function<void()> command) {
+    { std::lock_guard<std::mutex> lock(queueMutex); commands.push_back(std::move(command)); }
+    queueReady.notify_one();
 }
 
 void b3Frame::runCore() {
-    // Run the emulator until stopped
-    while (running.load())
-        core->runFrame();
+    while (!workerStop.load()) {
+        std::function<void()> command;
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            queueReady.wait(lock, [this] { return workerStop.load() || !commands.empty() || session.autoRun.load(); });
+            if (workerStop.load()) break;
+            if (!commands.empty()) { command = std::move(commands.front()); commands.pop_front(); }
+        }
+        try {
+            if (command) command();
+            else if (session.autoRun.load()) {
+                auto next = std::chrono::steady_clock::now() + std::chrono::microseconds(16667);
+                session.advance();
+                bool limit; { std::lock_guard<std::recursive_mutex> lock(mutex); limit = Settings::fpsLimiter; }
+                if (limit) {
+                    std::unique_lock<std::mutex> lock(queueMutex);
+                    queueReady.wait_until(lock, next, [this] { return workerStop.load() || !commands.empty(); });
+                }
+            }
+        } catch (const std::exception &e) { session.pause(); session.output(std::string("ERROR: ") + e.what()); }
+        catch (...) { session.pause(); session.output("ERROR: Emulator operation failed"); }
+        uiFps = session.core ? session.core->fps : 0;
+        uiOverrides = session.hasOverrides();
+    }
+    // Release Lua callbacks before shutdown so user code cannot prolong closing.
+    session.resetScripts(); session.stop();
 }
 
 void b3Frame::startCore(bool full) {
-    // Fully stop and restart the core, or handle errors
-    if (full) {
-        stopCore(true);
-        try {
-            mutex.lock();
-            core = new Core(cartPath, glSupport ? &((b3CanvasOgl*)canvas)->contextFunc : nullptr);
-            mutex.unlock();
-        }
-        catch (CoreError e) {
-            core = nullptr;
-            mutex.unlock();
-            wxMessageDialog(this, "One of the boot ROMs is missing! Check the path settings to configure them. "
-                "You probably also want a NAND dump from GodMode9 and a FAT-formatted SD image file.",
-                "Boot ROMs Missing", wxICON_NONE).ShowModal();
-            return;
-        }
-    }
-
-    // Update the resting axis values so relative offsets can be taken
-    if (joystick)
-        for (int i = 0; i < joystick->GetNumberAxes(); i++)
-            axisBases[i] = joystick->GetPosition(i);
-
-    // Start the core thread if not already running
-    if (running.load()) return;
-    running.store(true);
-    thread = new std::thread(&b3Frame::runCore, this);
-
-    // Update the system menu for running
-    systemMenu->SetLabel(PAUSE, "&Pause");
-    systemMenu->SetLabel(RESTART, "&Restart");
-    systemMenu->Enable(PAUSE, true);
-    systemMenu->Enable(STOP, true);
+    if (joystick) for (int i = 0; i < joystick->GetNumberAxes(); ++i) axisBases[i] = joystick->GetPosition(i);
+    enqueue([this, full] { session.cancelled = false; session.start(full); session.resume(); });
 }
 
 void b3Frame::stopCore(bool full) {
-    // Stop the core thread if it was running
-    if (running.load()) {
-        running.store(false);
-        thread->join();
-        delete thread;
-    }
+    enqueue([this, full] { session.cancelled = false; full ? session.stop() : session.pause(); });
+}
 
-    // Update the system menu for pausing or stopping
-    systemMenu->SetLabel(PAUSE, "&Resume");
-    if (!full) return;
-    systemMenu->SetLabel(RESTART, "&Start");
-    systemMenu->Enable(PAUSE, false);
-    systemMenu->Enable(STOP, false);
-
-    // Fully stop and remove the core
-    mutex.lock();
-    if (core) {
-        delete core;
-        core = nullptr;
-    }
-    mutex.unlock();
+void b3Frame::runScript(const std::string &path) {
+    uint64_t generation = session.cancelGeneration.load();
+    enqueue([this, path, generation] {
+        if (generation != session.cancelGeneration.load()) return;
+        session.cancelled = false;
+        session.runFile(path);
+    });
 }
 
 uint32_t *b3Frame::getFrame() {
@@ -243,13 +253,14 @@ uint32_t *b3Frame::getFrame() {
 
     // Get a new frame from the core, or make an empty one if inactive
     uint32_t *frame;
-    mutex.lock();
-    if (core) {
-        frame = core->pdc.getFrame();
-        mutex.unlock();
+    // A long-running callback must not block painting or the Cancel button.
+    if (!session.consumerMutex.try_lock()) return nullptr;
+    if (session.core) {
+        frame = session.core->pdc.getFrame();
+        session.consumerMutex.unlock();
     }
     else {
-        mutex.unlock();
+        session.consumerMutex.unlock();
         frame = new uint32_t[400 * 480];
         memset(frame, 0, 400 * 480 * sizeof(uint32_t));
     }
@@ -258,31 +269,13 @@ uint32_t *b3Frame::getFrame() {
 }
 
 void b3Frame::pressKey(int key) {
-    // Handle a key press based on its type
-    mutex.lock();
-    if (core) {
-        if (key < 12)
-            core->input.pressKey(key);
-        else if (key < 17)
-            stickKeys[key - 12] = true, updateKeyStick();
-        else
-            core->input.pressHome();
-    }
-    mutex.unlock();
+    if (key >= 12 && key < 17) { stickKeys[key - 12] = true; updateKeyStick(); return; }
+    enqueue([this, key] { if (session.core) { if (key < 12) session.core->input.pressKey(key); else session.core->input.pressHome(); } });
 }
 
 void b3Frame::releaseKey(int key) {
-    // Handle a key release based on its type
-    mutex.lock();
-    if (core) {
-        if (key < 12)
-            core->input.releaseKey(key);
-        else if (key < 17)
-            stickKeys[key - 12] = false, updateKeyStick();
-        else
-            core->input.releaseHome();
-    }
-    mutex.unlock();
+    if (key >= 12 && key < 17) { stickKeys[key - 12] = false; updateKeyStick(); return; }
+    enqueue([this, key] { if (session.core) { if (key < 12) session.core->input.releaseKey(key); else session.core->input.releaseHome(); } });
 }
 
 void b3Frame::updateKeyStick() {
@@ -306,21 +299,15 @@ void b3Frame::updateKeyStick() {
     }
 
     // Send key-stick coordinates to the core
-    core->input.setLStick(stickX, stickY);
+    enqueue([this, stickX, stickY] { if (session.core) session.core->input.setLStick(stickX, stickY); });
 }
 
 void b3Frame::pressScreen(int x, int y) {
-    // Send a screen press to the core
-    mutex.lock();
-    if (core) core->input.pressScreen(x, y);
-    mutex.unlock();
+    enqueue([this, x, y] { if (session.core) session.core->input.pressScreen(x, y); });
 }
 
 void b3Frame::releaseScreen() {
-    // Send a screen release to the core
-    mutex.lock();
-    if (core) core->input.releaseScreen();
-    mutex.unlock();
+    enqueue([this] { if (session.core) session.core->input.releaseScreen(); });
 }
 
 void b3Frame::insertCart(wxCommandEvent &event) {
@@ -331,6 +318,8 @@ void b3Frame::insertCart(wxCommandEvent &event) {
 
     // Set the cartridge path and start or restart the core
     cartPath = (const char*)romSelect.GetPath().mb_str(wxConvUTF8);
+    std::string path = cartPath;
+    enqueue([this, path] { session.cartPath = path; });
     startCore(true);
     fileMenu->Enable(EJECT_CART, true);
 }
@@ -338,7 +327,7 @@ void b3Frame::insertCart(wxCommandEvent &event) {
 void b3Frame::ejectCart(wxCommandEvent &event) {
     // Clear the cartridge path and restart the core if started
     cartPath = "";
-    if (core) startCore(true);
+    enqueue([this] { session.cartPath.clear(); if (session.core) { session.start(true); session.resume(); } });
     fileMenu->Enable(EJECT_CART, false);
 }
 
@@ -349,7 +338,7 @@ void b3Frame::quit(wxCommandEvent &event) {
 
 void b3Frame::pause(wxCommandEvent &event) {
     // Pause or resume the core
-    running.load() ? stopCore(false) : startCore(false);
+    session.autoRun.load() ? stopCore(false) : startCore(false);
 }
 
 void b3Frame::restart(wxCommandEvent &event) {
@@ -363,6 +352,12 @@ void b3Frame::stop(wxCommandEvent &event) {
 }
 
 void b3Frame::setHardware(wxCommandEvent &event) {
+    std::unique_lock<std::recursive_mutex> lock(mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        wxMessageBox("Pause emulation or cancel the running script before changing these settings.",
+            "Emulator busy", wxOK | wxICON_INFORMATION, this);
+        return;
+    }
     // Show the set hardware dialog
     HardwareDialog hardwareDialog;
     hardwareDialog.ShowModal();
@@ -370,31 +365,41 @@ void b3Frame::setHardware(wxCommandEvent &event) {
 
 void b3Frame::fpsLimiter(wxCommandEvent &event) {
     // Toggle the FPS limiter setting
-    Settings::fpsLimiter = !Settings::fpsLimiter;
-    Settings::save();
+    enqueue([this] { std::lock_guard<std::recursive_mutex> lock(mutex); Settings::fpsLimiter = !Settings::fpsLimiter; Settings::save(); });
 }
 
 void b3Frame::cartAutoBoot(wxCommandEvent &event) {
     // Toggle the cart auto-boot setting
-    Settings::cartAutoBoot = !Settings::cartAutoBoot;
-    Settings::save();
+    enqueue([this] { std::lock_guard<std::recursive_mutex> lock(mutex); Settings::cartAutoBoot = !Settings::cartAutoBoot; Settings::save(); });
 }
 
 template <int i> void b3Frame::dspBackend(wxCommandEvent &event) {
     // Set the DSP backend to a specific value
-    Settings::dspBackend = i;
-    Settings::save();
+    enqueue([this] { std::lock_guard<std::recursive_mutex> lock(mutex); Settings::dspBackend = i; Settings::save(); });
 }
 
 void b3Frame::gpuSettings(wxCommandEvent &event) {
+    std::unique_lock<std::recursive_mutex> lock(mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        wxMessageBox("Pause emulation or cancel the running script before changing these settings.",
+            "Emulator busy", wxOK | wxICON_INFORMATION, this);
+        return;
+    }
     // Show the GPU settings dialog
     GpuDialog gpuDialog(glSupport);
     gpuDialog.ShowModal();
 }
 
 void b3Frame::pathSettings(wxCommandEvent &event) {
+    std::unique_lock<std::recursive_mutex> lock(mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        wxMessageBox("Pause emulation or cancel the running script before changing these settings.",
+            "Emulator busy", wxOK | wxICON_INFORMATION, this);
+        return;
+    }
     // Show the path settings dialog
     PathDialog pathDialog;
+    if (session.hasOverrides()) pathDialog.SetTitle("Saved Path Settings (temporary overrides active)");
     pathDialog.ShowModal();
 }
 
@@ -499,20 +504,108 @@ void b3Frame::updateJoystick(wxTimerEvent &event) {
     }
 
     // Send coordinates to the core if key-stick is inactive
-    mutex.lock();
-    if (core && !stickKeys[0] && !stickKeys[1] && !stickKeys[2] && !stickKeys[3])
-        core->input.setLStick(stickX, stickY);
-    mutex.unlock();
+    if (!stickKeys[0] && !stickKeys[1] && !stickKeys[2] && !stickKeys[3])
+        enqueue([this, stickX, stickY] { if (session.core) session.core->input.setLStick(stickX, stickY); });
 }
 
-void b3Frame::close(wxCloseEvent &event) {
+b3Frame::~b3Frame() {
+    // Native application quit can destroy windows without a close event.
+    shutdown();
+}
+
+void b3Frame::shutdown() {
     // Clean up the joystick if used
     if (joystick) {
         timer->Stop();
-        delete joystick;
+        delete joystick; joystick = nullptr;
     }
 
-    // Stop the core
-    stopCore(true);
+    // Audio must stop before this frame and its core pointers can be destroyed.
+    static_cast<b3App*>(wxTheApp)->stopAudio();
+    session.requestCancel(); workerStop = true; queueReady.notify_one();
+    if (thread) { thread->join(); delete thread; thread = nullptr; }
+}
+
+void b3Frame::close(wxCloseEvent &event) {
+    shutdown();
     event.Skip(true);
+}
+
+void b3Frame::scriptMessage(wxThreadEvent &event) {
+    if (!event.GetInt()) {
+        logHistory += event.GetString() + "\n";
+        if (event.GetString().StartsWith("ERROR:") && !scriptWindow) {
+            wxCommandEvent open; scripting(open);
+        }
+        if (logHistory.size() > 1048576) logHistory = logHistory.Right(524288);
+        if (scriptLog) { scriptLog->ChangeValue(logHistory); scriptLog->ShowPosition(scriptLog->GetLastPosition()); }
+    } else {
+        std::string name = event.GetPayload<std::string>();
+        if (event.GetString().empty()) {
+            bufferTexts.erase(name);
+            auto found = bufferViews.find(name);
+            if (found != bufferViews.end()) {
+                int page = scriptBuffers->FindPage(found->second);
+                if (page != wxNOT_FOUND) scriptBuffers->DeletePage(page);
+                bufferViews.erase(found);
+            }
+            return;
+        }
+        bufferTexts[name] = event.GetString().ToStdString(wxConvUTF8);
+        if (scriptBuffers) {
+            if (!bufferViews.count(name)) {
+                auto *view = new wxTextCtrl(scriptBuffers, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
+                view->SetFont(wxFont(wxFontInfo(11).Family(wxFONTFAMILY_TELETYPE)));
+                bufferViews[name] = view; scriptBuffers->AddPage(view, wxString::FromUTF8(name));
+            }
+            bufferViews[name]->ChangeValue(event.GetString());
+        }
+    }
+}
+
+void b3Frame::scripting(wxCommandEvent &) {
+    if (scriptWindow) { scriptWindow->Show(); scriptWindow->Raise(); return; }
+    scriptWindow = new wxFrame(this, wxID_ANY, "3Beans Scripting", wxDefaultPosition, wxSize(800, 600));
+    auto *panel = new wxPanel(scriptWindow);
+    auto *layout = new wxBoxSizer(wxVERTICAL);
+    auto *buttons = new wxBoxSizer(wxHORIZONTAL);
+    auto *load = new wxButton(panel, wxID_ANY, "Load script...");
+    auto *cancel = new wxButton(panel, wxID_ANY, "Cancel execution");
+    auto *reset = new wxButton(panel, wxID_ANY, "Reset scripting");
+    buttons->Add(load, 0, wxALL, 4); buttons->Add(cancel, 0, wxALL, 4); buttons->Add(reset, 0, wxALL, 4);
+    layout->Add(buttons, 0, wxEXPAND);
+    scriptBuffers = new wxNotebook(panel, wxID_ANY);
+    scriptLog = new wxTextCtrl(scriptBuffers, wxID_ANY, logHistory, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
+    scriptLog->SetFont(wxFont(wxFontInfo(11).Family(wxFONTFAMILY_TELETYPE)));
+    scriptBuffers->AddPage(scriptLog, "Console");
+    for (auto &entry : bufferTexts) {
+        auto *view = new wxTextCtrl(scriptBuffers, wxID_ANY, wxString::FromUTF8(entry.second), wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
+        view->SetFont(wxFont(wxFontInfo(11).Family(wxFONTFAMILY_TELETYPE)));
+        bufferViews[entry.first] = view; scriptBuffers->AddPage(view, wxString::FromUTF8(entry.first));
+    }
+    layout->Add(scriptBuffers, 1, wxEXPAND | wxALL, 4);
+    scriptCommand = new wxTextCtrl(panel, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+    layout->Add(scriptCommand, 0, wxEXPAND | wxALL, 4); panel->SetSizer(layout);
+    scriptCommand->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent &) {
+        std::string code = scriptCommand->GetValue().ToStdString(wxConvUTF8); scriptCommand->Clear();
+        uint64_t generation = session.cancelGeneration.load();
+        enqueue([this, code, generation] {
+            if (generation != session.cancelGeneration.load()) return;
+            session.cancelled = false;
+            session.runString(code);
+        });
+    });
+    load->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        wxFileDialog dialog(scriptWindow, "Load Lua script", "", "", "Lua scripts (*.lua)|*.lua", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dialog.ShowModal() == wxID_OK) runScript(dialog.GetPath().ToStdString(wxConvUTF8));
+    });
+    cancel->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { session.requestCancel(); });
+    reset->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        session.requestCancel();
+        enqueue([this] { session.cancelled = false; session.resetScripts(); session.output("Scripting reset; temporary boot paths retained."); });
+    });
+    scriptWindow->Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent &event) {
+        if (event.CanVeto()) { scriptWindow->Hide(); event.Veto(); } else event.Skip();
+    });
+    scriptWindow->Show();
 }

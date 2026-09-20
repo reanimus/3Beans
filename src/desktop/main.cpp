@@ -18,6 +18,17 @@
 */
 
 #include "b3_app.h"
+#include "../scripting/cli.h"
+#include <exception>
 
-// Let wxWidgets handle the main function
-wxIMPLEMENT_APP(b3App);
+wxIMPLEMENT_APP_NO_MAIN(b3App);
+
+int main(int argc, char **argv) {
+    try { launchOptions.parse(argc, argv); }
+    catch (const std::exception &e) { fprintf(stderr, "%s\n%s", e.what(), commandHelp()); return 2; }
+    if (launchOptions.help) { fputs(commandHelp(), stdout); return 0; }
+    if (launchOptions.headless) return runHeadless(launchOptions);
+    // Our parser owns CLI arguments; wxWidgets receives only the application name.
+    int wxArgc = 1;
+    return wxEntry(wxArgc, argv);
+}

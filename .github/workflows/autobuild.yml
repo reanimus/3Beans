@@ -15,21 +15,25 @@ jobs:
         msystem: UCRT64
         update: true
     - name: Install tools and dependencies
-      run: pacman -S mingw-w64-ucrt-x86_64-{gcc,pkg-config,wxwidgets3.3-msw,portaudio,libepoxy,jbigkit} make --noconfirm
+      run: pacman -S mingw-w64-ucrt-x86_64-{gcc,pkg-config,wxwidgets3.3-msw,portaudio,libepoxy,jbigkit,libpng,python} make --noconfirm
       shell: msys2 {0}
     - name: Checkout
       uses: actions/checkout@v4
     - name: Compile
       run: |
         make -j$(nproc)
+        make test
         strip 3beans.exe
+        cp third_party/lua/LICENSE Lua-LICENSE.txt
       shell: msys2 {0}
       working-directory: ${{ github.workspace }}
     - name: Upload
       uses: actions/upload-artifact@v4
       with:
         name: 3beans-windows
-        path: 3beans.exe
+        path: |
+          3beans.exe
+          Lua-LICENSE.txt
 
   build-mac:
     runs-on: macos-latest
@@ -48,8 +52,10 @@ jobs:
         make -j$(sysctl -n hw.logicalcpu)
         sudo make install
     - name: Compile
-      shell: 'nix-shell -p portaudio libepoxy libGL pkg-config --run "bash {0}"'
-      run: make -j$(sysctl -n hw.logicalcpu)
+      shell: 'nix-shell -p portaudio libepoxy libGL libpng python3 pkg-config --run "bash {0}"'
+      run: |
+        make -j$(sysctl -n hw.logicalcpu)
+        make test
     - name: Bundle
       run: meta/mac-bundle.sh --dmg
     - name: Upload

@@ -26,13 +26,15 @@
 
 class b3App: public wxApp {
 public:
+    void stopAudio();
     static int audBufSize;
     static int keyBinds[MAX_KEYS];
 
 private:
     b3Frame *frame;
-    wxTimer *timer;
-    PaStream *stream;
+    wxTimer *timer = nullptr;
+    PaStream *stream = nullptr;
+    bool audioInitialized = false;
 
     bool OnInit();
     int OnExit();

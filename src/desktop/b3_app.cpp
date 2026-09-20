@@ -20,6 +20,7 @@
 #include <wx/filename.h>
 #include <wx/stdpaths.h>
 #include "b3_app.h"
+#include "../scripting/cli.h"
 
 enum AppEvent {
     UPDATE = 1
@@ -60,28 +61,10 @@ bool b3App::OnInit() {
     };
     Settings::add(platSettings);
 
-    // Try to load the settings file
-    if (FILE *file = fopen("3beans.ini", "r")) {
-        // Load from the working directory if a file exists
-        fclose(file);
-        Settings::load();
-    }
-    else {
-        // Load from the system-specific application settings directory
-        std::string settingsDir;
-        wxStandardPaths &paths = wxStandardPaths::Get();
-#if defined(WINDOWS) || defined(MACOS) || !wxCHECK_VERSION(3, 1, 0)
-        settingsDir = paths.GetUserDataDir().mb_str(wxConvUTF8);
-#else
-        paths.SetFileLayout(wxStandardPaths::FileLayout_XDG);
-        settingsDir = paths.GetUserConfigDir().mb_str(wxConvUTF8);
-        settingsDir += "/3beans";
-#endif
-        Settings::load(settingsDir);
-    }
+    SetAppName("3Beans");
+    Settings::load(launchOptions.configDir.empty() ? defaultConfigDir() : launchOptions.configDir);
 
     // Create the program's frame
-    SetAppName("3Beans");
     frame = new b3Frame();
 
     // Set up the update timer
@@ -89,18 +72,22 @@ bool b3App::OnInit() {
     timer->Start(6);
 
     // Initialize the audio output stream
-    Pa_Initialize();
-    Pa_OpenDefaultStream(&stream, 0, 2, paInt16, 48000, audBufSize, audioCallback, frame);
-    Pa_StartStream(stream);
+    audioInitialized = Pa_Initialize() == paNoError;
+    if (audioInitialized && Pa_OpenDefaultStream(&stream, 0, 2, paInt16, 48000, audBufSize, audioCallback, frame) == paNoError)
+        Pa_StartStream(stream);
     return true;
 }
 
 int b3App::OnExit() {
     // Clean up the audio output stream
-    Pa_StopStream(stream);
-    Pa_CloseStream(stream);
-    Pa_Terminate();
+    stopAudio();
     return wxApp::OnExit();
+}
+
+void b3App::stopAudio() {
+    if (timer) { timer->Stop(); delete timer; timer = nullptr; }
+    if (stream) { Pa_StopStream(stream); Pa_CloseStream(stream); stream = nullptr; }
+    if (audioInitialized) { Pa_Terminate(); audioInitialized = false; }
 }
 
 void b3App::update(wxTimerEvent &event) {
@@ -112,14 +99,13 @@ int b3App::audioCallback(const void *in, void *out, unsigned long count,
         const PaStreamCallbackTimeInfo *info, PaStreamCallbackFlags flags, void *data) {
     // Get samples from the core if available
     b3Frame *frame = (b3Frame*)data;
-    frame->mutex.lock();
-    uint32_t *samples = frame->core ? frame->core->csnd.getSamples(48000, count) : nullptr;
-    frame->mutex.unlock();
-
-    // Copy samples to the output buffer or fill it with silence
-    if (samples)
-        memcpy(out, samples, count * sizeof(uint32_t));
-    else
-        memset(out, 0, count * sizeof(uint32_t));
+    memset(out, 0, count * sizeof(uint32_t));
+    if (frame->session.consumerMutex.try_lock()) {
+        if (frame->session.core) {
+            uint32_t *samples = frame->session.core->csnd.getSamples(48000, count);
+            if (samples) memcpy(out, samples, count * sizeof(uint32_t));
+        }
+        frame->session.consumerMutex.unlock();
+    }
     return paContinue;
 }

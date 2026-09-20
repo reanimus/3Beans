@@ -117,6 +117,18 @@ void Cp15::updateMap9(uint32_t start, uint32_t end) {
 }
 
 template <typename T> T Cp15::read(CpuId id, uint32_t address) {
+    T value = readImpl<T>(id, address);
+    if ((core.watchReads & BIT(id)) && core.observingData)
+        core.memoryAccess(id, id == ARM9 ? address & ~(sizeof(T) - 1) : address, sizeof(T), false, value);
+    return value;
+}
+
+template <typename T> T Cp15::readImpl(CpuId id, uint32_t address) {
+    if (id != ARM9 && (address & 0xFFF) + sizeof(T) > 0x1000) {
+        T value = 0;
+        for (unsigned i = 0; i < sizeof(T); ++i) value |= T(readImpl<uint8_t>(id, address + i)) << (8 * i);
+        return value;
+    }
     // Get a pointer to mapped readable memory if it exists
     uint8_t *data;
     if (id == ARM9) {
@@ -148,6 +160,16 @@ template <typename T> T Cp15::read(CpuId id, uint32_t address) {
 }
 
 template <typename T> void Cp15::write(CpuId id, uint32_t address, T value) {
+    writeImpl<T>(id, address, value);
+    if ((core.watchWrites & BIT(id)) && core.observingData)
+        core.memoryAccess(id, id == ARM9 ? address & ~(sizeof(T) - 1) : address, sizeof(T), true, value);
+}
+
+template <typename T> void Cp15::writeImpl(CpuId id, uint32_t address, T value) {
+    if (id != ARM9 && (address & 0xFFF) + sizeof(T) > 0x1000) {
+        for (unsigned i = 0; i < sizeof(T); ++i) writeImpl<uint8_t>(id, address + i, value >> (8 * i));
+        return;
+    }
     // Get a pointer to mapped writable memory and adjust its tag to signal change
     uint8_t *data;
     if (id == ARM9) {

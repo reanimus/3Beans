@@ -45,8 +45,8 @@ Gpu::~Gpu() {
 
 void Gpu::createRender() {
     // Initialize a new renderer of the current type
-    if (Settings::gpuRenderer == 1) (*contextFunc)();
-    switch (renderType = Settings::gpuRenderer) {
+    if (core.renderer() == 1) (*contextFunc)();
+    switch (renderType = core.renderer()) {
         default: gpuRender = new GpuRenderSoft(core); break;
         case 1: gpuRender = new GpuRenderOgl(core); break;
     }
@@ -72,8 +72,8 @@ void Gpu::syncRender(bool end) {
         std::this_thread::yield();
 
     // Check if the renderer/shader or threaded GPU settings changed
-    bool unchanged = (renderType == Settings::gpuRenderer && (renderType != 1 || shaderType == Settings::gpuVtxShader));
-    if (unchanged && (!running.load() || !thread == !Settings::threadedGpu) && !end) return;
+    bool unchanged = (renderType == core.renderer() && (renderType != 1 || shaderType == Settings::gpuVtxShader));
+    if (unchanged && (!running.load() || !thread == !core.threadedRenderer()) && !end) return;
 
     // Stop the GPU thread or release context on this thread depending on settings
     if (running.exchange(false)) {

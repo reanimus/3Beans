@@ -20,6 +20,7 @@ fi
 install -dm755 "${contents}"/{MacOS,Resources,Frameworks}
 install -sm755 3beans "${contents}/MacOS/3Beans"
 install -m644 meta/Info.plist "$contents/Info.plist"
+install -m644 third_party/lua/LICENSE "$contents/Resources/Lua-LICENSE.txt"
 
 # macOS does not have the -f flag for readlink
 abspath() {

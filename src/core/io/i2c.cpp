@@ -21,7 +21,7 @@
 
 I2c::I2c(Core &core): core(core) {
     // Try to load MCU RAM data from a file
-    if (FILE *file = fopen((Settings::basePath + "/mcu_ram.bin").c_str(), "rb")) {
+    if (FILE *file = fopen((core.bootConfig.stateDirectory + "/mcu_ram.bin").c_str(), "rb")) {
         fread(mcuRamData, sizeof(uint8_t), sizeof(mcuRamData), file);
         fclose(file);
     }
@@ -35,7 +35,7 @@ I2c::~I2c() {
 void I2c::updateMcuRam() {
     // Update the MCU RAM file if its data changed
     if (!ramDirty) return;
-    if (FILE *file = fopen((Settings::basePath + "/mcu_ram.bin").c_str(), "wb")) {
+    if (FILE *file = fopen((core.bootConfig.stateDirectory + "/mcu_ram.bin").c_str(), "wb")) {
         LOG_INFO("Writing updated MCU RAM file to disk\n");
         fwrite(mcuRamData, sizeof(uint8_t), sizeof(mcuRamData), file);
         fclose(file);

@@ -47,13 +47,13 @@ bool Memory::init() {
     updateMap(true, 0x0, 0xFFFFFFFF);
 
     // Try to load the ARM11 boot ROM
-    FILE *file = fopen(Settings::boot11Path.c_str(), "rb");
+    FILE *file = fopen(core.bootConfig.boot11.c_str(), "rb");
     if (!file) return false;
     fread(boot11, sizeof(uint8_t), 0x10000, file);
     fclose(file);
 
     // Try to load the ARM9 boot ROM
-    file = fopen(Settings::boot9Path.c_str(), "rb");
+    file = fopen(core.bootConfig.boot9.c_str(), "rb");
     if (!file) return false;
     fread(boot9, sizeof(uint8_t), 0x10000, file);
     fclose(file);
@@ -267,4 +267,22 @@ void Memory::writeCfg9Extmemcnt9(uint32_t mask, uint32_t value) {
 void Memory::writeCfg9Bootenv(uint32_t mask, uint32_t value) {
     // Write to the CFG9_BOOTENV register
     cfg9Bootenv = (cfg9Bootenv & ~mask) | (value & mask);
+}
+
+void Memory::invalidateRange(uint32_t base, uint32_t offset, uint32_t length) {
+    if (!length) return;
+    // Only ARM11 physical tags are consumed by the GPU texture cache.
+    if (base == 0x1FF00000) {
+        uintptr_t begin = reinterpret_cast<uintptr_t>(dspWram + offset);
+        uintptr_t end = begin + length;
+        // DSP WRAM has configurable aliases in this 512 KiB window.
+        for (unsigned page = 0x1FF00; page < 0x1FF80; ++page) {
+            uintptr_t mapped = reinterpret_cast<uintptr_t>(memMap11[page].write);
+            if (mapped && mapped < end && mapped + 0x1000 > begin) ++memMap11[page].tag;
+        }
+        return;
+    }
+    uint64_t begin = uint64_t(base) + offset;
+    uint64_t end = begin + length - 1;
+    for (uint64_t page = begin >> 12; page <= end >> 12; ++page) ++memMap11[page].tag;
 }

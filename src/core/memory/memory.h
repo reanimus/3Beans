@@ -63,6 +63,7 @@ public:
 
     bool init();
     void loadOtp(FILE *file);
+    void invalidateRange(uint32_t base, uint32_t offset, uint32_t length);
     void updateMap(bool arm9, uint32_t start, uint32_t end);
 
     template <typename T> T read(CpuId id, uint32_t address);
@@ -72,6 +73,7 @@ public:
     template <typename T> void writeFallback(CpuId id, uint32_t address, T value);
 
 private:
+    friend class ScriptSession;
     Core &core;
 
     uint8_t arm9Ram[0x180000] = {}; // 1.5MB ARM9 internal RAM

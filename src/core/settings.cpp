@@ -59,9 +59,10 @@ void Settings::add(std::vector<Setting> &extra) {
     settings.insert(settings.end(), extra.begin(), extra.end());
 }
 
-bool Settings::load(std::string path) {
+bool Settings::load(std::string path, bool createDefaults) {
     // Set the base path and ensure the folder exists
-    mkdir((basePath = path).c_str() MKDIR_ARGS);
+    basePath = path;
+    if (createDefaults) mkdir(basePath.c_str() MKDIR_ARGS);
 
     // Open the settings file or set defaults if it doesn't exist
     FILE *file = fopen((basePath + "/3beans.ini").c_str(), "r");
@@ -70,7 +71,7 @@ bool Settings::load(std::string path) {
         Settings::boot9Path = basePath + "/boot9.bin";
         Settings::nandPath = basePath + "/nand.bin";
         Settings::sdPath = basePath + "/sd.img";
-        Settings::save();
+        if (createDefaults) Settings::save();
         return false;
     }
 

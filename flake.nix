@@ -54,13 +54,23 @@
           pname = "3beans";
           version = "unstable";
 
-          src = self;
+          src = pkgs.lib.cleanSourceWith {
+            src = self;
+            filter = path: type:
+              let
+                relative = pkgs.lib.removePrefix "${self}/" (toString path);
+                root = builtins.head (pkgs.lib.splitString "/" relative);
+              in
+              pkgs.lib.cleanSourceFilter path type
+              && !(builtins.elem root [ "build" "reference" "3beans" "result" ]);
+          };
 
           nativeBuildInputs = [ pkgs.pkg-config ];
 
           buildInputs = [
             pkgs.portaudio
             pkgs.libepoxy
+            pkgs.libpng
             finalAttrs.wxWidgets
           ];
 
@@ -71,10 +81,18 @@
           makeFlags = [ "CXX=${pkgs.stdenv.cc.targetPrefix}c++" ];
 
           enableParallelBuilding = true;
+          doCheck = true;
+          nativeCheckInputs = [ pkgs.python3 ];
+          checkPhase = ''
+            runHook preCheck
+            make test
+            runHook postCheck
+          '';
 
           installPhase = ''
             runHook preInstall
             install -Dm755 3beans $out/bin/3beans
+            install -Dm644 third_party/lua/LICENSE $out/share/licenses/3beans/Lua-LICENSE.txt
             runHook postInstall
           '';
 

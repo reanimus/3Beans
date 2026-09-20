@@ -20,15 +20,22 @@
 #include <cstring>
 #include "../core.h"
 
+std::vector<uint32_t> Pdc::latestFrame() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return latest ? *latest : std::vector<uint32_t>();
+}
+
 uint32_t *Pdc::getFrame() {
-    // Get the next frame in the queue when one is ready
-    if (!ready.load()) return nullptr;
-    mutex.lock();
-    uint32_t *fb = buffers.front();
-    buffers.pop();
-    ready.store(!buffers.empty());
-    mutex.unlock();
-    return fb;
+    std::shared_ptr<std::vector<uint32_t>> frame;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (buffers.empty()) return nullptr;
+        frame = buffers.front();
+        buffers.pop();
+    }
+    uint32_t *copy = new uint32_t[frame->size()];
+    std::copy(frame->begin(), frame->end(), copy);
+    return copy;
 }
 
 void Pdc::drawScreen(int i, uint32_t *buffer) {
@@ -110,27 +117,25 @@ void Pdc::drawFrame() {
     if (((pdcInterruptType[1] >> 8) & 0x7) != 0x7)
         core.interrupts.sendInterrupt(ARM11, 0x2B);
 
-    // Update screen base addresses and sync the GPU thread if one changed
-    for (int i = 0; i < 2; i++) {
-        uint32_t base = (pdcFramebufSelAck[i] & BIT(0)) ? pdcFramebufLt1[i] : pdcFramebufLt0[i];
-        if (screenBases[i] != base) core.gpu.syncRender();
-        screenBases[i] = base;
+    // Retain one shared snapshot for screenshots; do not copy pixels per vblank.
+    // A stalled presenter must not make the producer repeatedly convert frames.
+    if (!core.bootConfig.headless) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (buffers.size() == 2) return;
     }
+    // Synchronize only frames that we actually capture (including reused buffers).
+    core.gpu.syncRender();
+    for (int i = 0; i < 2; i++)
+        screenBases[i] = (pdcFramebufSelAck[i] & BIT(0)) ? pdcFramebufLt1[i] : pdcFramebufLt0[i];
 
-    // Allow up to 2 framebuffers to be queued
-    if (buffers.size() == 2) return;
-    uint32_t *buffer = new uint32_t[400 * 480];
-    memset(buffer, 0, 400 * 480 * sizeof(uint32_t));
+    auto buffer = std::make_shared<std::vector<uint32_t>>(400 * 480, 0);
+    drawScreen(0, buffer->data());
+    drawScreen(1, buffer->data() + 240 * 400 + 40);
 
-    // Draw the top and bottom screens
-    drawScreen(0, &buffer[0]);
-    drawScreen(1, &buffer[240 * 400 + 40]);
+    std::lock_guard<std::mutex> lock(mutex);
+    latest = buffer;
+    if (!core.bootConfig.headless) buffers.push(buffer);
 
-    // Add the frame to the queue
-    mutex.lock();
-    buffers.push(buffer);
-    ready.store(true);
-    mutex.unlock();
 }
 
 void Pdc::writeFramebufLt0(int i, uint32_t mask, uint32_t value) {

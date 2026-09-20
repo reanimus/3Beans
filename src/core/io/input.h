@@ -43,7 +43,13 @@ public:
     uint32_t readSpiFifoData();
     uint32_t readSpiFifoIntMask() { return spiFifoIntMask; }
     uint32_t readSpiFifoIntStat() { return spiFifoIntStat; }
-    uint16_t readHidPad() { return hidPad; }
+    uint16_t readHidPad() { return hidPad & ~scriptKeys; }
+    uint16_t getScriptKeys() const { return scriptKeys; }
+    void setScriptKeys(uint16_t keys) { scriptKeys = keys & 0xFFF; }
+    void setScriptTouch(int x, int y, bool active);
+    void setScriptStick(int x, int y, bool active);
+    void setScriptHome(bool pressed);
+    void clearScriptInput();
 
     void writeSpiFifoCnt(uint32_t mask, uint32_t value);
     void writeSpiFifoSelect(uint32_t mask, uint32_t value);
@@ -55,6 +61,11 @@ public:
 private:
     Core &core;
     uint8_t homeState = 0;
+    uint16_t scriptKeys = 0;
+    bool hostHome = false, scriptHome = false;
+    bool scriptTouch = false, scriptStick = false;
+    int hostTouchX = 0, hostTouchY = 0, hostStickX = 0, hostStickY = 0;
+    bool hostTouch = false;
 
     uint16_t stickLX = 0x7FF;
     uint16_t stickLY = 0x7FF;

@@ -21,6 +21,10 @@
 
 #include <mutex>
 #include <thread>
+#include <condition_variable>
+#include <deque>
+#include <wx/notebook.h>
+#include "../scripting/session.h"
 #include <wx/wx.h>
 #include <wx/joystick.h>
 
@@ -30,12 +34,15 @@
 
 class b3Frame: public wxFrame {
 public:
-    Core *core = nullptr;
+    ScriptSession session;
     std::atomic<bool> running{false};
-    std::mutex mutex;
+    std::recursive_mutex &mutex;
 
     b3Frame();
+    ~b3Frame() override;
     void Refresh();
+    void enqueue(std::function<void()> command);
+    void runScript(const std::string &path);
 
     uint32_t *getFrame();
     void pressKey(int key);
@@ -49,7 +56,21 @@ private:
     wxJoystick *joystick;
     wxTimer *timer;
 
-    std::thread *thread;
+    std::thread *thread = nullptr;
+    std::mutex queueMutex;
+    std::condition_variable queueReady;
+    std::deque<std::function<void()>> commands;
+    std::atomic<bool> workerStop{false};
+    std::atomic<bool> uiCore{false}, uiOverrides{false};
+    std::atomic<int> uiFps{0};
+    wxFrame *scriptWindow = nullptr;
+    wxTextCtrl *scriptLog = nullptr, *scriptCommand = nullptr;
+    wxNotebook *scriptBuffers = nullptr;
+    std::map<std::string, wxTextCtrl*> bufferViews;
+    std::map<std::string, std::string> bufferTexts;
+    wxString logHistory;
+    void scripting(wxCommandEvent &event);
+    void scriptMessage(wxThreadEvent &event);
     std::string cartPath;
     std::vector<int> axisBases;
     bool stickKeys[5] = {};
@@ -60,6 +81,7 @@ private:
     int refreshRate = 0;
     bool glSupport = true;
 
+    void shutdown();
     void runCore();
     void startCore(bool full);
     void stopCore(bool full);

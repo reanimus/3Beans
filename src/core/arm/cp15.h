@@ -52,6 +52,9 @@ public:
     void writeReg(CpuId id, uint8_t cn, uint8_t cm, uint8_t cp, uint32_t value);
 
 private:
+    friend class ScriptSession;
+    template <typename T> T readImpl(CpuId id, uint32_t address);
+    template <typename T> void writeImpl(CpuId id, uint32_t address, T value);
     Core &core;
 
     MmuMap mmuMaps[MAX_CPUS - 1][0x100000] = {};

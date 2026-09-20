@@ -65,8 +65,8 @@ public:
 
 private:
     Core &core;
-    std::condition_variable condVars[2];
-    std::mutex mutexes[3];
+    std::condition_variable consumed;
+    std::mutex bufferMutex;
     std::atomic<bool> ready{false};
 
     uint32_t *mixBuffer = nullptr;
@@ -76,7 +76,7 @@ private:
     uint32_t mixFreq = 0, mixSize = 0;
     uint32_t csndSize = 0, csndOfs = 0;
     uint32_t dspSize = 0;
-    DspClock dspClock = CLK_OFF;
+    std::atomic<DspClock> dspClock{CLK_OFF};
 
     static const int8_t indexTable[8];
     static const int16_t adpcmTable[89];

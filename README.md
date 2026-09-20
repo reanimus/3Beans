@@ -33,11 +33,11 @@ you're just a user!
 
 ### Building
 **Windows:** Install [MSYS2](https://www.msys2.org) and run the command
-`pacman -Syu mingw-w64-ucrt-x86_64-{gcc,pkg-config,wxwidgets3.3-msw,portaudio,libepoxy,jbigkit} make` to get
+`pacman -Syu mingw-w64-ucrt-x86_64-{gcc,pkg-config,wxwidgets3.3-msw,portaudio,libepoxy,jbigkit,libpng,python} make` to get
 dependencies. Navigate to the project root directory and run `make -j$(nproc)` to start building.
 
 **macOS/Linux:** On the target system, install [wxWidgets](https://www.wxwidgets.org) (v3.3.2 or higher),
-[PortAudio](https://www.portaudio.com), and [Epoxy](https://github.com/anholt/libepoxy). This can be done with a package
+[PortAudio](https://www.portaudio.com), [Epoxy](https://github.com/anholt/libepoxy), and libpng. This can be done with a package
 manager like [Homebrew](https://brew.sh) on macOS, or a built-in one on Linux. Run `make` in the project root directory
 to start building.
 
@@ -51,3 +51,26 @@ to start building.
 ### Other Links
 * [Hydra's Lair](https://hydr8gon.github.io) - Blog where I may or may not write about things
 * [Discord Server](https://discord.gg/JbNz7y4) - A place to chat about my projects and stuff
+
+### Lua scripting
+Lua 5.4.7 is bundled and statically linked on every target; no Lua installation is required. Standard libraries and native module loading are available
+(subject to platform linking conventions); scripts run with the application’s permissions.
+
+Open **File → Scripting** to load Lua files or enter commands. Scripts can inspect memory,
+control input and execution, capture screenshots, and debug individual ARM CPUs.
+See [the scripting reference](docs/scripting.md) and [example scripts](scripts).
+
+For automated tests, use headless mode with temporary boot paths:
+
+```sh
+3beans --headless --script test.lua --sd test-sd.img --nand nand.bin \
+  --boot9 boot9.bin --boot11 boot11.bin --timeout 60
+```
+
+Scripts explicitly call `emu:start()` and `emu:runFrame()`. Returning exits headless mode;
+uncaught errors and timeouts return a nonzero status. Boot-path overrides apply on the next
+start/reset and never replace saved settings. The mounted images remain writable.
+
+`nix build` builds the application and runs the scripting tests. `make test` also runs the
+synthetic firmware tests directly (requires Python 3). When using a Git checkout, add new
+source files to Git before `nix build`, or use `nix build path:.` to include untracked files.

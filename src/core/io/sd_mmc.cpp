@@ -29,7 +29,7 @@ SdMmc::~SdMmc() {
 
 bool SdMmc::init(SdMmc &other) {
     // Try to open an SD image to share between ports
-    other.sd = sd = fopen(Settings::sdPath.c_str(), "rb+");
+    other.sd = sd = fopen(core.bootConfig.sd.c_str(), "rb+");
     other.id = 1;
 
     // Check the SD's capacity so cards over 2GB can be handled differently
@@ -40,7 +40,7 @@ bool SdMmc::init(SdMmc &other) {
     }
 
     // Try to open a GM9 NAND dump and load CID and OTP data
-    if (!(other.nand = nand = fopen(Settings::nandPath.c_str(), "rb+"))) return false;
+    if (!(other.nand = nand = fopen(core.bootConfig.nand.c_str(), "rb+"))) return false;
     fseek(nand, 0xC00, SEEK_SET);
     fread(mmcCid, sizeof(uint32_t), 4, nand);
     memcpy(other.mmcCid, mmcCid, sizeof(mmcCid));

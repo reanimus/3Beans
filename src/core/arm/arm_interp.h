@@ -20,6 +20,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include "../defines.h"
 
 class Core;
@@ -32,10 +33,14 @@ public:
 
     ArmInterp(Core &core, CpuId id);
     void init();
+    uint32_t debugPc() const { return *registers[15] - ((cpsr & BIT(5)) ? 2 : 4); }
+    uint32_t debugReadRegister(const std::string &name) const;
+    void debugWriteRegister(const std::string &name, uint32_t value);
+    void debugRefreshPipeline() { *registers[15] = debugPc(); flushPipeline(); }
 
     void resetCycles();
     static void stopCycles(Core *core);
-    template <bool cores, bool dsp> static void runFrame(Core &core);
+    template <bool cores, bool dsp, bool debug = false> static void runFrame(Core &core);
 
     void halt(uint8_t mask);
     void unhalt(uint8_t mask);
@@ -74,7 +79,7 @@ private:
     static const uint8_t condition[0x100];
     static const uint8_t bitCount[0x100];
 
-    int runOpcode();
+    template <bool debug> int runOpcode();
     uint16_t getOpcode16();
     uint32_t getOpcode32();
     void flushPipeline();

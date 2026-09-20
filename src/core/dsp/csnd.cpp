@@ -40,6 +40,7 @@ Csnd::~Csnd() {
 }
 
 uint32_t *Csnd::getSamples(uint32_t freq, uint32_t count) {
+    std::lock_guard<std::mutex> lock(bufferMutex);
     // Check if parameters changed and update the buffer details if so
     dspSize = count * ((dspClock == CLK_33KHZ) ? 32728 : 47605) / freq;
     if (mixFreq != freq || mixSize != count) {
@@ -56,11 +57,8 @@ uint32_t *Csnd::getSamples(uint32_t freq, uint32_t count) {
         }
     }
 
-    // Try to wait for buffer data, but don't starve if it takes too long
-    bool wait; {
-        std::unique_lock<std::mutex> lock(mutexes[1]);
-        wait = !condVars[1].wait_for(lock, std::chrono::microseconds(1000000 / 60), [&]{ return ready.load(); });
-    }
+    // The audio thread must never wait for the emulation thread.
+    bool wait = !ready.load();
 
     // Fill the output buffer depending on if it's still waiting
     if (wait) {
@@ -70,7 +68,6 @@ uint32_t *Csnd::getSamples(uint32_t freq, uint32_t count) {
     }
     else {
         // Resample and add CSND and DSP left/right samples together
-        mutexes[2].lock();
         for (int i = 0; i < count; i++) {
             int j = i * dspSize / count;
             uint32_t csnd = csndBuffer[1][i * csndSize / count];
@@ -85,14 +82,10 @@ uint32_t *Csnd::getSamples(uint32_t freq, uint32_t count) {
             lastSample[1] = dspBuffer[j - 1];
             dspBuffer.erase(dspBuffer.begin(), dspBuffer.begin() + j);
         }
-        mutexes[2].unlock();
     }
 
-    { // Signal that the buffer was processed
-        std::lock_guard<std::mutex> guard(mutexes[0]);
-        ready.store(false);
-        condVars[0].notify_one();
-    }
+    ready.store(false);
+    consumed.notify_one();
     return mixBuffer;
 }
 
@@ -216,36 +209,31 @@ void Csnd::runSample() {
 }
 
 void Csnd::sampleCsnd(int16_t left, int16_t right) {
+    std::unique_lock<std::mutex> lock(bufferMutex);
     // Write samples to the buffer and check if full
     if (!csndSize) return;
     csndBuffer[0][csndOfs++] = (right << 16) | (left & 0xFFFF);
     if (csndOfs != csndSize) return;
 
     // Limit FPS to 60 if enabled by waiting for the previous buffer to play
-    if (Settings::fpsLimiter) {
-        std::unique_lock<std::mutex> lock(mutexes[0]);
-        condVars[0].wait_for(lock, std::chrono::microseconds(1000000), [&]{ return !ready.load(); });
+    if (core.bootConfig.audioPacing && Settings::fpsLimiter) {
+        consumed.wait_for(lock, std::chrono::milliseconds(50), [&]{ return !ready.load(); });
     }
 
     // Swap buffers and reset the pointer
     std::swap(csndBuffer[0], csndBuffer[1]);
     csndOfs = 0;
 
-    { // Signal that a buffer is ready to play
-        std::lock_guard<std::mutex> guard(mutexes[1]);
-        ready.store(true);
-        condVars[1].notify_one();
-    }
+    ready.store(true);
 }
 
 void Csnd::sampleDsp(int16_t left, int16_t right) {
     // Enqueue a volume-scaled DSP sample for mixing, up to twice the size of an output frame
-    mutexes[2].lock();
+    std::lock_guard<std::mutex> lock(bufferMutex);
     if (dspBuffer.size() < dspSize * 2) {
         int vol = std::min<int>(0x20, codecSndexcnt & 0x3F);
         dspBuffer.push_back((((right * vol) >> 5) << 16) | (((left * vol) >> 5) & 0xFFFF));
     }
-    mutexes[2].unlock();
 }
 
 void Csnd::startChannel(int i) {

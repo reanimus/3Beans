@@ -33,6 +33,8 @@ void Input::releaseKey(int key) {
 
 void Input::pressScreen(int x, int y) {
     // Set the touch state to active, with coordinates converted to 12-bit
+    hostTouchX = x; hostTouchY = y; hostTouch = true;
+    if (scriptTouch) return;
     touchX = std::min(0xFFF, std::max(0, x * 0xFFF / 320));
     touchY = std::min(0xFFF, std::max(0, y * 0xFFF / 240));
     touchActive = true;
@@ -40,24 +42,54 @@ void Input::pressScreen(int x, int y) {
 
 void Input::releaseScreen() {
     // Set the touch state to inactive and reset coordinates
+    hostTouch = false;
+    if (scriptTouch) return;
     touchX = touchY = 0xFFF;
     touchActive = false;
 }
 
 void Input::setLStick(int x, int y) {
     // Set the left stick coordinates, converting them to unsigned
+    hostStickX = x; hostStickY = y;
+    if (scriptStick) return;
     stickLX = std::min(0xFFF, std::max(0, x + 0x7FF));
     stickLY = std::min(0xFFF, std::max(0, y + 0x7FF));
 }
 
 void Input::pressHome() {
     // Set a bit to request a home button press
-    homeState |= BIT(0);
+    if (!hostHome && !scriptHome) homeState |= BIT(0);
+    hostHome = true;
 }
 
 void Input::releaseHome() {
     // Set a bit to request a home button release
-    homeState |= BIT(1);
+    if (hostHome && !scriptHome) homeState |= BIT(1);
+    hostHome = false;
+}
+
+void Input::setScriptTouch(int x, int y, bool active) {
+    scriptTouch = active;
+    if (active) {
+        touchX = x * 0xFFF / 320; touchY = y * 0xFFF / 240; touchActive = true;
+    } else if (hostTouch) pressScreen(hostTouchX, hostTouchY);
+    else releaseScreen();
+}
+
+void Input::setScriptStick(int x, int y, bool active) {
+    scriptStick = active;
+    if (active) { stickLX = x + 0x7FF; stickLY = y + 0x7FF; }
+    else setLStick(hostStickX, hostStickY);
+}
+
+void Input::setScriptHome(bool pressed) {
+    if (scriptHome != pressed && !hostHome) homeState |= BIT(pressed ? 0 : 1);
+    scriptHome = pressed;
+}
+
+void Input::clearScriptInput() {
+    scriptKeys = 0; setScriptTouch(0, 0, false);
+    setScriptStick(0, 0, false); setScriptHome(false);
 }
 
 void Input::updateHome() {

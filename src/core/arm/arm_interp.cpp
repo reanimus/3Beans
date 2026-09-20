@@ -19,11 +19,17 @@
 
 #include "arm_interp.h"
 #include "../core.h"
+#include <stdexcept>
 
-template void ArmInterp::runFrame<false, false>(Core&);
-template void ArmInterp::runFrame<false, true>(Core&);
-template void ArmInterp::runFrame<true, false>(Core&);
-template void ArmInterp::runFrame<true, true>(Core&);
+template void ArmInterp::runFrame<false, false, false>(Core&);
+template void ArmInterp::runFrame<false, false, true>(Core&);
+template void ArmInterp::runFrame<false, true, false>(Core&);
+template void ArmInterp::runFrame<false, true, true>(Core&);
+template void ArmInterp::runFrame<true, false, false>(Core&);
+template void ArmInterp::runFrame<true, false, true>(Core&);
+template void ArmInterp::runFrame<true, true, false>(Core&);
+template void ArmInterp::runFrame<true, true, true>(Core&);
+
 
 ArmInterp::ArmInterp(Core &core, CpuId id): core(core), id(id) {
     // Initialize the registers for user mode
@@ -31,8 +37,12 @@ ArmInterp::ArmInterp(Core &core, CpuId id): core(core), id(id) {
         registers[i] = &registersUsr[i & 0xF];
 
     // Don't start extra ARM11 cores right away
-    if (id == ARM11C || id == ARM11D)
-        halt(BIT(0));
+    // Core's scheduler is not constructed yet. Initialize disabled processors
+    // directly; halt() would schedule into an unconstructed events vector.
+    if (id == ARM11C || id == ARM11D) {
+        halted = BIT(0);
+        cycles = UINT64_MAX;
+    }
 }
 
 void ArmInterp::init() {
@@ -55,48 +65,64 @@ void ArmInterp::stopCycles(Core *core) {
             core->arms[i].cycles = -1;
 }
 
-template <bool cores, bool dsp> void ArmInterp::runFrame(Core &core) {
-    // Run a frame of CPU instructions and events
-    while (core.running.exchange(true)) {
-        // Run the CPUs until the next scheduled task
+template <bool cores, bool dsp, bool debug> void ArmInterp::runFrame(Core &core) {
+    core.running.store(true);
+    int cursor = core.schedulerCpu;
+    unsigned polls = core.pollInstructions;
+    while (core.running.load()) {
         while (core.events[0].cycles > core.globalCycles) {
-            // Run 2 or 4 ARM11 cores depending on what's enabled
-            for (int i = 0; i < (cores ? 4 : 2); i++)
-                if (core.globalCycles >= core.arms[i].cycles)
-                    core.arms[i].cycles = core.globalCycles + core.arms[i].runOpcode();
-
-            // Run the ARM9 at half the speed of the ARM11
-            if (core.globalCycles >= core.arms[ARM9].cycles)
-                core.arms[ARM9].cycles = core.globalCycles + (core.arms[ARM9].runOpcode() << 1);
-
-            // Handle the DSP CPU if it's enabled
+            // Keep the cursor across debugger/host yields, including mid-cycle stops.
+            while (cursor < MAX_CPUS) {
+                if (++polls >= 1024) {
+                    polls = 0;
+                    if (core.shouldYield && core.shouldYield()) {
+                        core.schedulerCpu = cursor;
+                        core.pollInstructions = polls;
+                        return;
+                    }
+                }
+                int i = cursor;
+                if ((i < 2 || i == ARM9 || cores) && core.globalCycles >= core.arms[i].cycles) {
+                    if (debug && (core.beforeMask & BIT(i)) && core.beforeInstruction(CpuId(i))) {
+                        core.schedulerCpu = cursor;
+                        core.pollInstructions = polls;
+                        return;
+                    }
+                    if (debug) core.instructionAddress = core.arms[i].debugPc();
+                    int ticks = core.arms[i].runOpcode<debug>();
+                    if (debug) core.observingData = false;
+                    core.arms[i].cycles = core.globalCycles + (i == ARM9 ? ticks * 2 : ticks);
+                    ++cursor;
+                    if (debug && (core.afterMask & BIT(i)) && core.afterInstruction(CpuId(i))) {
+                        core.schedulerCpu = cursor;
+                        core.pollInstructions = polls;
+                        return;
+                    }
+                } else ++cursor;
+                if (!cores && cursor == ARM11C) cursor = ARM9;
+            }
             if (dsp) {
-                // Run the Teak and jump to the next soonest ARM9 or Teak cycle
                 TeakInterp &teak = ((DspLle*)core.dsp)->teak;
                 if (core.globalCycles >= teak.cycles)
                     teak.cycles = core.globalCycles + (teak.runOpcode() << 1);
                 core.globalCycles = std::min(core.arms[ARM9].cycles, teak.cycles);
-            }
-            else {
-                // Jump to the next soonest ARM9 cycle
-                core.globalCycles = core.arms[ARM9].cycles;
-            }
-
-            // Jump to the next soonest ARM11 cycle if it's closer
+            } else core.globalCycles = core.arms[ARM9].cycles;
             for (int i = 0; i < (cores ? 4 : 2); i++)
                 core.globalCycles = std::min(core.globalCycles, core.arms[i].cycles);
+            cursor = 0;
         }
-
-        // Jump to the next task and run all that are scheduled now
         core.globalCycles = core.events[0].cycles;
         while (core.events[0].cycles <= core.globalCycles) {
             (*core.events[0].task)();
             core.events.erase(core.events.begin());
         }
     }
+    core.schedulerCpu = cursor;
+    core.pollInstructions = polls;
 }
 
-FORCE_INLINE int ArmInterp::runOpcode() {
+template <bool debug> FORCE_INLINE int ArmInterp::runOpcode() {
+    if (debug) core.observingData = false;
     // Push the next opcode through the pipeline
     uint32_t opcode = pipeline[0];
     pipeline[0] = pipeline[1];
@@ -106,6 +132,7 @@ FORCE_INLINE int ArmInterp::runOpcode() {
         // Increment the program counter and fill the pipeline from pointer or fallback
         pipeline[1] = (((*registers[15] += 2) & 0xFFE) && pcData) ? U8TO16(pcData += 2, 0) : getOpcode16();
 
+        if (debug) core.observingData = true;
         // Execute a THUMB instruction
         return (this->*thumbInstrs[(opcode >> 6) & 0x3FF])(opcode);
     }
@@ -113,6 +140,7 @@ FORCE_INLINE int ArmInterp::runOpcode() {
         // Increment the program counter and fill the pipeline from pointer or fallback
         pipeline[1] = (((*registers[15] += 4) & 0xFFC) && pcData) ? U8TO32(pcData += 4, 0) : getOpcode32();
 
+        if (debug) core.observingData = true;
         // Execute an ARM instruction based on its condition
         switch (condition[((opcode >> 24) & 0xF0) | (cpsr >> 28)]) {
             case 0: return 1; // False
@@ -123,6 +151,11 @@ FORCE_INLINE int ArmInterp::runOpcode() {
 }
 
 uint16_t ArmInterp::getOpcode16() {
+    struct FetchScope {
+        bool &flag; bool previous;
+        FetchScope(bool &flag): flag(flag), previous(flag) { flag = false; }
+        ~FetchScope() { flag = previous; }
+    } fetchScope(core.observingData);
     // Set the opcode pointer or fall back to a regular 16-bit opcode read
     if (!(pcData = core.cp15.getReadPtr(id, *registers[15])))
         return core.cp15.read<uint16_t>(id, *registers[15]);
@@ -131,6 +164,11 @@ uint16_t ArmInterp::getOpcode16() {
 }
 
 uint32_t ArmInterp::getOpcode32() {
+    struct FetchScope {
+        bool &flag; bool previous;
+        FetchScope(bool &flag): flag(flag), previous(flag) { flag = false; }
+        ~FetchScope() { flag = previous; }
+    } fetchScope(core.observingData);
     // Set the opcode pointer or fall back to a regular 32-bit opcode read
     if (!(pcData = core.cp15.getReadPtr(id, *registers[15])))
         return core.cp15.read<uint32_t>(id, *registers[15]);
@@ -165,6 +203,11 @@ int ArmInterp::exception(uint8_t vector) {
 }
 
 void ArmInterp::flushPipeline() {
+    struct FetchScope {
+        bool &flag; bool previous;
+        FetchScope(bool &flag): flag(flag), previous(flag) { flag = false; }
+        ~FetchScope() { flag = previous; }
+    } fetchScope(core.observingData);
     // Adjust the program counter and refill the pipeline after a jump
     if (cpsr & BIT(5)) { // THUMB mode
         pipeline[0] = core.cp15.read<uint16_t>(id, *registers[15] &= ~0x1);
@@ -295,4 +338,38 @@ int ArmInterp::unkThumb(uint16_t opcode) {
     else
         LOG_CRIT("Unknown ARM11 core %d THUMB opcode: 0x%X\n", id, opcode);
     return 1;
+}
+
+uint32_t ArmInterp::debugReadRegister(const std::string &name) const {
+    if (name == "pc" || name == "r15") return debugPc();
+    if (name == "cpsr") return cpsr;
+    if (name == "spsr") {
+        if (!spsr) throw std::runtime_error("SPSR is unavailable in this CPU mode");
+        return *spsr;
+    }
+    int index = name == "sp" ? 13 : name == "lr" ? 14 : -1;
+    for (int i = 0; i < 15; ++i) if (name == "r" + std::to_string(i)) index = i;
+    if (index < 0) throw std::runtime_error("Unknown ARM register: " + name);
+    return *registers[index];
+}
+
+void ArmInterp::debugWriteRegister(const std::string &name, uint32_t value) {
+    if (name == "pc" || name == "r15") {
+        *registers[15] = value; flushPipeline(); return;
+    }
+    if (name == "cpsr") {
+        unsigned mode = value & 31;
+        if (mode != 0x10 && mode != 0x11 && mode != 0x12 && mode != 0x13 &&
+            mode != 0x17 && mode != 0x1B && mode != 0x1F)
+            throw std::runtime_error("Invalid CPSR processor mode");
+        uint32_t pc = debugPc(); setCpsr(value); *registers[15] = pc; flushPipeline(); return;
+    }
+    if (name == "spsr") {
+        if (!spsr) throw std::runtime_error("SPSR is unavailable in this CPU mode");
+        *spsr = value; return;
+    }
+    int index = name == "sp" ? 13 : name == "lr" ? 14 : -1;
+    for (int i = 0; i < 15; ++i) if (name == "r" + std::to_string(i)) index = i;
+    if (index < 0) throw std::runtime_error("Unknown ARM register: " + name);
+    *registers[index] = value;
 }

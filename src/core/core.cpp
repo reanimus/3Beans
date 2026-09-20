@@ -20,7 +20,7 @@
 #include <algorithm>
 #include "core.h"
 
-Core::Core(std::string &cartPath, std::function<void()> *contextFunc): aes(*this), arms { ArmInterp(*this, ARM11A),
+Core::Core(std::string &cartPath, std::function<void()> *contextFunc, const BootConfig &config): bootConfig(config), aes(*this), arms { ArmInterp(*this, ARM11A),
         ArmInterp(*this, ARM11B), ArmInterp(*this, ARM11C), ArmInterp(*this, ARM11D), ArmInterp(*this, ARM9) },
         cartridge(*this, cartPath), cdmas { Cdma(*this, CDMA0), Cdma(*this, CDMA1), Cdma(*this, XDMA) }, cp15(*this),
         csnd(*this), gpu(*this, contextFunc), i2c(*this), input(*this), interrupts(*this), memory(*this),
@@ -142,6 +142,7 @@ void Core::resetCycles() {
         arms[i].resetCycles();
     dsp->resetCycles();
     timers.resetCycles();
+    elapsedCycles += globalCycles;
     globalCycles = 0;
     schedule(RESET_CYCLES, 0x7FFFFFFFFFFFFFFF);
 }
@@ -150,6 +151,7 @@ void Core::endFrame() {
     // Break execution at the end of a frame and count it
     running.store(false);
     fpsCount++;
+    frameCounter++;
 
     // Update the FPS counter and save files every second
     std::chrono::duration<double> fpsTime = std::chrono::steady_clock::now() - lastFpsTime;
@@ -170,10 +172,14 @@ void Core::endFrame() {
 void Core::updateRunFunc() {
     // Swap out the run function based on ARM11 cores 2/3 and DSP backend
     bool dspOff = (dspCurrent == 1 || ((DspLle*)dsp)->teak.cycles == -1);
-    if ((interrupts.cfg11MpBootcnt[0] | interrupts.cfg11MpBootcnt[1]) & BIT(4)) // Cores enabled
-        runFunc = dspOff ? &ArmInterp::runFrame<true, false> : &ArmInterp::runFrame<true, true>;
-    else // Cores disabled
-        runFunc = dspOff ? &ArmInterp::runFrame<false, false> : &ArmInterp::runFrame<false, true>;
+    bool extraCores = (interrupts.cfg11MpBootcnt[0] | interrupts.cfg11MpBootcnt[1]) & BIT(4);
+    if (debugging) {
+        if (extraCores) runFunc = dspOff ? &ArmInterp::runFrame<true, false, true> : &ArmInterp::runFrame<true, true, true>;
+        else runFunc = dspOff ? &ArmInterp::runFrame<false, false, true> : &ArmInterp::runFrame<false, true, true>;
+    } else {
+        if (extraCores) runFunc = dspOff ? &ArmInterp::runFrame<true, false> : &ArmInterp::runFrame<true, true>;
+        else runFunc = dspOff ? &ArmInterp::runFrame<false, false> : &ArmInterp::runFrame<false, true>;
+    }
     running.store(false);
 }
 
@@ -182,4 +188,10 @@ void Core::schedule(Task task, uint64_t cycles) {
     Event event(&tasks[task], globalCycles + cycles);
     auto it = std::upper_bound(events.cbegin(), events.cend(), event);
     events.insert(it, event);
+}
+
+void Core::setDebugging(bool enabled) {
+    if (debugging == enabled) return;
+    debugging = enabled;
+    updateRunFunc();
 }

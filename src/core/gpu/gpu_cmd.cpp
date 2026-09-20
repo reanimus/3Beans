@@ -105,7 +105,7 @@ FORCE_INLINE uint32_t Gpu::flt32e7to32e8(uint32_t value) {
 void Gpu::runCommands() {
     // Start the GPU thread or set context on this thread depending on settings
     if (!running.exchange(true)) {
-        if (Settings::threadedGpu)
+        if (core.threadedRenderer())
             thread = new std::thread(&Gpu::runThreaded, this);
         else if (renderType == 1)
             (*contextFunc)();

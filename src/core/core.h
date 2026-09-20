@@ -26,6 +26,7 @@
 
 #include "defines.h"
 #include "settings.h"
+#include "boot_config.h"
 #include "arm/arm_interp.h"
 #include "arm/cp15.h"
 #include "arm/interrupts.h"
@@ -122,6 +123,25 @@ struct Event {
 
 class Core {
 public:
+    const BootConfig bootConfig;
+    uint64_t frameCounter = 0;
+    uint64_t elapsedCycles = 0;
+    // Execution hooks are called only by the emulation thread.
+    std::function<bool(CpuId)> beforeInstruction;
+    std::function<bool(CpuId)> afterInstruction;
+    std::function<void(CpuId, uint32_t, unsigned, bool, uint32_t)> memoryAccess;
+    std::function<bool()> shouldYield;
+    bool observingData = false;
+    uint8_t watchReads = 0, watchWrites = 0;
+    uint8_t beforeMask = 0, afterMask = 0;
+    void setDebugging(bool enabled);
+    uint32_t instructionAddress = 0;
+    int schedulerCpu = 0;
+    unsigned pollInstructions = 0;
+    uint64_t currentCycle() const { return elapsedCycles + globalCycles; }
+    int renderer() const { return (bootConfig.headless || bootConfig.forceSoftware) ? 0 : Settings::gpuRenderer; }
+    int threadedRenderer() const { return bootConfig.headless ? 0 : Settings::threadedGpu; }
+
     int fps = 0;
     bool n3dsMode = false;
 
@@ -152,7 +172,7 @@ public:
     std::vector<Event> events;
     uint64_t globalCycles = 0;
 
-    Core(std::string &cartPath, std::function<void()> *contextFunc = nullptr);
+    Core(std::string &cartPath, std::function<void()> *contextFunc = nullptr, const BootConfig &config = BootConfig());
     ~Core();
 
     void runFrame() { (*runFunc)(*this); }
@@ -160,6 +180,7 @@ public:
     void initDsp();
 
 private:
+    bool debugging = false;
     std::function<void()> tasks[MAX_TASKS];
     void (*runFunc)(Core&) = &ArmInterp::runFrame<false, false>;
     int dspCurrent = 0;
