@@ -47,6 +47,7 @@ uint32_t *Csnd::getSamples(uint32_t freq, uint32_t count) {
         mixFreq = freq, mixSize = count;
         csndSize = count * 130914 / freq;
         csndOfs = 0;
+        ready = false;
 
         // Initialize or resize the buffers themselves
         delete[] mixBuffer;
@@ -217,7 +218,10 @@ void Csnd::sampleCsnd(int16_t left, int16_t right) {
 
     // Limit FPS to 60 if enabled by waiting for the previous buffer to play
     if (core.bootConfig.audioPacing && Settings::fpsLimiter) {
-        consumed.wait_for(lock, std::chrono::milliseconds(50), [&]{ return !ready.load(); });
+        // Allow two host callback periods plus scheduling headroom. Large audio
+        // buffers must not be overwritten before their consumer's next callback.
+        uint64_t waitUs = std::max<uint64_t>(50000, uint64_t(mixSize) * 2000000 / mixFreq + 20000);
+        consumed.wait_for(lock, std::chrono::microseconds(waitUs), [&]{ return !ready.load(); });
     }
 
     // Swap buffers and reset the pointer

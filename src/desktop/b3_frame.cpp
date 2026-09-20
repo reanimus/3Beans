@@ -195,7 +195,7 @@ void b3Frame::runCore() {
         std::function<void()> command;
         {
             std::unique_lock<std::mutex> lock(queueMutex);
-            queueReady.wait(lock, [this] { return workerStop.load() || !commands.empty() || session.autoRun.load(); });
+            queueReady.wait(lock, [this] { return workerStop.load() || (!settingsOpen.load() && (!commands.empty() || session.autoRun.load())); });
             if (workerStop.load()) break;
             if (!commands.empty()) { command = std::move(commands.front()); commands.pop_front(); }
         }
@@ -221,18 +221,18 @@ void b3Frame::runCore() {
 
 void b3Frame::startCore(bool full) {
     if (joystick) for (int i = 0; i < joystick->GetNumberAxes(); ++i) axisBases[i] = joystick->GetPosition(i);
-    enqueue([this, full] { session.cancelled = false; session.start(full); session.resume(); });
+    enqueue([this, full] { session.clearCancel(); session.start(full); session.resume(); });
 }
 
 void b3Frame::stopCore(bool full) {
-    enqueue([this, full] { session.cancelled = false; full ? session.stop() : session.pause(); });
+    enqueue([this, full] { session.clearCancel(); full ? session.stop() : session.pause(); });
 }
 
 void b3Frame::runScript(const std::string &path) {
     uint64_t generation = session.cancelGeneration.load();
     enqueue([this, path, generation] {
         if (generation != session.cancelGeneration.load()) return;
-        session.cancelled = false;
+        session.clearCancel();
         session.runFile(path);
     });
 }
@@ -351,16 +351,37 @@ void b3Frame::stop(wxCommandEvent &event) {
     stopCore(true);
 }
 
+void b3Frame::showSettings(std::function<void()> dialog) {
+    if (settingsPending || workerStop.load()) return;
+    settingsPending = true;
+    // Reach a worker command boundary without ever blocking the UI on Lua.
+    enqueue([this, dialog] {
+        bool resume = session.autoRun.load();
+        session.pause();
+        settingsOpen = true;
+        CallAfter([this, dialog, resume] {
+            if (workerStop.load()) return;
+            dialog();
+            settingsPending = false;
+            if (workerStop.load()) return;
+            {
+                std::lock_guard<std::mutex> lock(queueMutex);
+                // Restore the old run state before handling subsequently queued work.
+                commands.push_front([this, resume] {
+                    if (resume && session.core && !session.cancelled.load()) session.resume();
+                });
+                settingsOpen = false;
+            }
+            queueReady.notify_one();
+        });
+    });
+}
+
 void b3Frame::setHardware(wxCommandEvent &event) {
-    std::unique_lock<std::recursive_mutex> lock(mutex, std::try_to_lock);
-    if (!lock.owns_lock()) {
-        wxMessageBox("Pause emulation or cancel the running script before changing these settings.",
-            "Emulator busy", wxOK | wxICON_INFORMATION, this);
-        return;
-    }
-    // Show the set hardware dialog
-    HardwareDialog hardwareDialog;
-    hardwareDialog.ShowModal();
+    showSettings([] {
+        HardwareDialog hardwareDialog;
+        hardwareDialog.ShowModal();
+    });
 }
 
 void b3Frame::fpsLimiter(wxCommandEvent &event) {
@@ -379,36 +400,27 @@ template <int i> void b3Frame::dspBackend(wxCommandEvent &event) {
 }
 
 void b3Frame::gpuSettings(wxCommandEvent &event) {
-    std::unique_lock<std::recursive_mutex> lock(mutex, std::try_to_lock);
-    if (!lock.owns_lock()) {
-        wxMessageBox("Pause emulation or cancel the running script before changing these settings.",
-            "Emulator busy", wxOK | wxICON_INFORMATION, this);
-        return;
-    }
-    // Show the GPU settings dialog
-    GpuDialog gpuDialog(glSupport);
-    gpuDialog.ShowModal();
+    showSettings([this] {
+        GpuDialog gpuDialog(glSupport);
+        gpuDialog.ShowModal();
+    });
 }
 
 void b3Frame::pathSettings(wxCommandEvent &event) {
-    std::unique_lock<std::recursive_mutex> lock(mutex, std::try_to_lock);
-    if (!lock.owns_lock()) {
-        wxMessageBox("Pause emulation or cancel the running script before changing these settings.",
-            "Emulator busy", wxOK | wxICON_INFORMATION, this);
-        return;
-    }
-    // Show the path settings dialog
-    PathDialog pathDialog;
-    if (session.hasOverrides()) pathDialog.SetTitle("Saved Path Settings (temporary overrides active)");
-    pathDialog.ShowModal();
+    showSettings([this] {
+        PathDialog pathDialog;
+        if (session.hasOverrides()) pathDialog.SetTitle("Saved Path Settings (temporary overrides active)");
+        pathDialog.ShowModal();
+    });
 }
 
 void b3Frame::inputBindings(wxCommandEvent &event) {
-    // Pause joystick updates and show the input bindings dialog
-    if (timer) timer->Stop();
-    InputDialog inputDialog(joystick);
-    inputDialog.ShowModal();
-    if (timer) timer->Start(10);
+    showSettings([this] {
+        if (timer) timer->Stop();
+        InputDialog inputDialog(joystick);
+        inputDialog.ShowModal();
+        if (timer) timer->Start(10);
+    });
 }
 
 void b3Frame::updateJoystick(wxTimerEvent &event) {
@@ -591,7 +603,7 @@ void b3Frame::scripting(wxCommandEvent &) {
         uint64_t generation = session.cancelGeneration.load();
         enqueue([this, code, generation] {
             if (generation != session.cancelGeneration.load()) return;
-            session.cancelled = false;
+            session.clearCancel();
             session.runString(code);
         });
     });
@@ -602,7 +614,7 @@ void b3Frame::scripting(wxCommandEvent &) {
     cancel->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { session.requestCancel(); });
     reset->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
         session.requestCancel();
-        enqueue([this] { session.cancelled = false; session.resetScripts(); session.output("Scripting reset; temporary boot paths retained."); });
+        enqueue([this] { session.clearCancel(); session.resetScripts(); session.output("Scripting reset; temporary boot paths retained."); });
     });
     scriptWindow->Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent &event) {
         if (event.CanVeto()) { scriptWindow->Hide(); event.Veto(); } else event.Skip();

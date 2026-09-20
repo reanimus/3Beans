@@ -189,16 +189,18 @@ void ScriptSession::start(bool reset) {
     config.audioPacing = !headless;
     bool existed = bool(core);
     // Validation precedes replacement; never keep stale host pointers on failure.
-    std::lock_guard<std::mutex> consumers(consumerMutex);
-    core.reset();
-    if (changed)
-        changed();
-    try {
-        core.reset(new Core(cartPath, context, config));
-    } catch (...) {
-        autoRun = false;
-        paused = true;
-        throw std::runtime_error("Core initialization failed");
+    {
+        std::lock_guard<std::mutex> consumers(consumerMutex);
+        core.reset();
+        if (changed)
+            changed();
+        try {
+            core.reset(new Core(cartPath, context, config));
+        } catch (...) {
+            autoRun = false;
+            paused = true;
+            throw std::runtime_error("Core initialization failed");
+        }
     }
     std::fill_n(skipPending, MAX_CPUS, false);
     accesses.clear();
@@ -634,11 +636,37 @@ void ScriptSession::initLua() {
     lua_setfield(lua, -2, "WATCHPOINT_TYPE");
     lua_setglobal(lua, "C");
 }
+void ScriptSession::clearCancel() {
+    cancelled = false;
+    if (lua)
+        restoreInterruptHooks();
+}
+
+void ScriptSession::restoreInterruptHooks() {
+    // Registry references keep interrupted coroutine objects alive until restoration.
+    for (int ref : interruptedThreads) {
+        lua_rawgeti(lua, LUA_REGISTRYINDEX, ref);
+        lua_sethook(lua_tothread(lua, -1), interrupt, LUA_MASKCOUNT, 10000);
+        lua_pop(lua, 1);
+        luaL_unref(lua, LUA_REGISTRYINDEX, ref);
+    }
+    interruptedThreads.clear();
+    lua_sethook(lua, interrupt, LUA_MASKCOUNT, 10000);
+}
+
 void ScriptSession::interrupt(lua_State* L, lua_Debug*) {
     ScriptSession* session = *static_cast<ScriptSession**>(lua_getextraspace(L));
     if (session->cancelled.load() || (session->deadline != std::chrono::steady_clock::time_point{} &&
                                       std::chrono::steady_clock::now() >= session->deadline)) {
-        // Once interrupted, catch/retry loops must not run another bytecode.
+        // Escalate both this coroutine and its main thread, so resume/pcall cannot
+        // continue executing in the parent after catching the interruption.
+        if (lua_gethookcount(L) != 1) {
+            lua_pushthread(L);
+            session->interruptedThreads.push_back(luaL_ref(L, LUA_REGISTRYINDEX));
+        }
+        lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+        lua_sethook(lua_tothread(L, -1), interrupt, LUA_MASKCOUNT, 1);
+        lua_pop(L, 1);
         lua_sethook(L, interrupt, LUA_MASKCOUNT, 1);
         luaL_error(L, "Script cancelled or timed out");
     }
@@ -691,7 +719,7 @@ bool ScriptSession::execute(int status) {
 bool ScriptSession::runFile(const std::string& path) {
     initLua();
     error = false;
-    lua_sethook(lua, interrupt, LUA_MASKCOUNT, 10000);
+    restoreInterruptHooks();
     try {
         checkCancelled();
         std::string absolute = absolutePath(path);
@@ -732,7 +760,7 @@ bool ScriptSession::runFile(const std::string& path) {
 bool ScriptSession::runString(const std::string& code) {
     initLua();
     error = false;
-    lua_sethook(lua, interrupt, LUA_MASKCOUNT, 10000);
+    restoreInterruptHooks();
     try {
         checkCancelled();
         return execute(luaL_loadbuffer(lua, code.data(), code.size(), "console"));
@@ -745,6 +773,7 @@ void ScriptSession::resetScripts() {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     requireOutsideCallback();
     callbacks.clear();
+    interruptedThreads.clear();
     points.clear();
     accesses.clear();
     if (bufferOutput)

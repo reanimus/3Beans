@@ -22,6 +22,9 @@ int main(int argc, char** argv) {
         std::string dir = argv[1];
         Settings::load(dir, false);
         ScriptSession session(true);
+        session.requestCancel();
+        session.clearCancel(); // Safe before the lazy Lua runtime exists.
+        check(!session.cancelled, "Fresh session did not clear cancellation");
         std::string errors;
         session.output = [&](const std::string& text) { errors += text + "\n"; };
         session.setPath("sd", dir + "/override.img");
@@ -111,15 +114,40 @@ int main(int argc, char** argv) {
               "Self-removing callback error was lost");
         check(session.runString("emu:runFrame(); assert(replacement)"), "Failed callback disabled its replacement");
         session.resetScripts();
-        std::thread cancel([&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            session.cancelled = true;
-        });
-        bool success = session.runString("while true do pcall(function() while true do end end) end");
-        cancel.join();
-        check(!success, "Cancellation did not interrupt Lua");
-        session.cancelled = false;
-        check(session.runString("assert(1 + 1 == 2)"), "Runtime did not recover after cancellation");
+        session.clearCancel(); // Also safe after the runtime has been reset.
+        session.headless = false;
+        for (const char* code : {"while true do pcall(function() while true do end end) end",
+                                 "cancelledCo=coroutine.create(function() while true do end end); "
+                                 "coroutine.resume(cancelledCo); continuedAfterCancel=true"}) {
+            check(
+                session.runString(
+                    "local id; id=callbacks:add('frame', function() "
+                    "local _,_,count=debug.gethook(); assert(count==10000); "
+                    "if cancelledCo then local _,_,n=debug.gethook(cancelledCo); assert(n==10000) end; "
+                    "assert(continuedAfterCancel==nil); "
+                    "local child=coroutine.create(function() local _,_,n=debug.gethook(); assert(n==10000) end); "
+                    "assert(coroutine.resume(child)); callbacks:remove(id); console:log('Resume hooks restored') end)"),
+                "Could not register cancellation recovery callback");
+            std::thread cancel([&] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                session.requestCancel();
+            });
+            bool success = session.runString(code);
+            cancel.join();
+            check(!success, "Cancellation did not interrupt Lua and its caller");
+            auto generation = session.cancelGeneration.load();
+            errors.clear();
+            // Match desktop Resume, with no intervening runString/runFile to restore hooks.
+            session.clearCancel();
+            session.start(false);
+            session.resume();
+            check(session.advance() == "frame", "Surviving callback failed after desktop Resume");
+            check(errors == "Resume hooks restored\n", "Desktop Resume did not restore Lua hooks");
+            check(session.cancelGeneration == generation, "Recovery reset the cancellation generation");
+            session.pause();
+            check(session.runString("assert(1 + 1 == 2)"), "Runtime did not recover after cancellation");
+        }
+        session.headless = true;
         // A halted selected processor returns a bounded timeout instead of hanging.
         session.core->arms[ARM9].halt(BIT(0));
         check(session.advance(ARM9, 5) == "timeout", "Halted CPU step did not time out");
@@ -160,13 +188,58 @@ int main(int argc, char** argv) {
         bool responsive =
             session.runString("local id; id = callbacks:add('frame', function() local t=os.clock(); while os.clock()-t "
                               "< 0.15 do end; callbacks:remove(id) end); emu:runFrame()");
+        unsigned bootReads = 0, bootReadStart = 0;
+        auto previousOutput = session.output;
+        session.output = [&](const std::string& message) {
+            if (message == "boot begin")
+                bootReadStart = reads.load();
+            else if (message == "boot end")
+                bootReads += reads.load() - bootReadStart;
+            else
+                previousOutput(message);
+        };
+        responsive &=
+            session.runString("local function boot() console:log('boot begin'); local t=os.clock(); "
+                              "while os.clock()-t < 0.15 do end; console:log('boot end') end; "
+                              "local a=callbacks:add('start',boot); local b=callbacks:add('reset',boot); "
+                              "emu:reset(); emu:stop(); emu:start(); callbacks:remove(a); callbacks:remove(b)");
+        session.output = previousOutput;
         for (int i = 0; i < 3; ++i) {
             session.start(true);
             session.advance();
         }
         consume = false;
         consumer.join();
-        check(responsive && reads > 20 && framesRead > 0, "Audio/display consumers stalled behind Lua");
+        check(responsive && reads > 20 && framesRead > 0 && bootReads > 20,
+              "Audio/display consumers stalled behind Lua");
+        session.stop();
+        // Screenshots follow the current frame even with an undrained desktop queue.
+        session.start();
+        check(session.runString("local fb=0x20040000; emu.physical:write32(0x10400468,fb); "
+                                "emu.physical:write32(0x10400470,0); emu.physical:write32(0x10400474,1); "
+                                "emu.physical:write32(0x10400490,960); emu:runFrame(); emu:runFrame(); "
+                                "emu:write32(fb+239*4,0xFF0000FF); "
+                                "local id=callbacks:add('frame',function() emu:screenshot('desktop-latest.png') end); "
+                                "emu:runFrame(); callbacks:remove(id)"),
+              "Desktop screenshot failed");
+        auto latest = session.core->pdc.latestFrame();
+        check(!latest.empty() && latest[0] == 0xFF0000FF, "Full queue left the latest capture stale");
+        session.stop();
+        // An 8192-sample host buffer takes 171 ms at 48 kHz, beyond the old 50 ms cap.
+        session.start();
+        Settings::fpsLimiter = 1;
+        session.core->csnd.getSamples(48000, 8192);
+        std::atomic<bool> producerDone{false};
+        std::thread producer([&] {
+            for (unsigned i = 0; i < 2 * (8192 * 130914 / 48000); ++i)
+                session.core->csnd.runSample();
+            producerDone = true;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        bool waitedForConsumer = !producerDone.load();
+        session.core->csnd.getSamples(48000, 8192);
+        producer.join();
+        check(waitedForConsumer, "Large audio buffer was overwritten before consumption");
         session.stop();
         // Lua conversion errors unwind C++ locks, including on coroutine stacks.
         check(session.runString("local co=coroutine.create(function() local b=console:createBuffer('unwind'); "
@@ -186,6 +259,7 @@ int main(int argc, char** argv) {
         session.bufferOutput = [&](const std::string&, const std::string& text) { snapshot = text; };
         check(session.runString("buf = console:createBuffer('exact'); buf:setSize(4, 2); buf:print('12345678')"),
               "Buffer setup failed");
+        check(session.runString("assert(buf:getX()==0 and buf:getY()==buf:rows())"), "Deferred cursor changed");
         check(snapshot == "1234\n5678\n", "Exact buffer fill scrolled too early");
         check(session.runString("buf:print(9)"), "Buffer numeric print failed");
         check(snapshot == "5678\n9   \n", "Buffer did not scroll on the next character");

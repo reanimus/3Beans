@@ -84,6 +84,7 @@ with tempfile.TemporaryDirectory(prefix='3beans-scripting-') as directory:
         assert result.returncode == 0, (mutation, result.stdout, result.stderr)
     if len(sys.argv) > 2:
         subprocess.run([str(Path(sys.argv[2]).resolve()), directory], cwd=root, check=True, timeout=30)
+        assert png_first_pixel(root / 'desktop-latest.png') == bytes((255, 0, 0, 255))
     for args in (['--headless'], ['--unknown'], ['--script'], ['--timeout', 'nan']):
         assert subprocess.run([binary, *args], capture_output=True).returncode == 2
 print('CLI scripting tests passed')

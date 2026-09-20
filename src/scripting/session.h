@@ -29,6 +29,8 @@ class ScriptSession {
         ++cancelGeneration;
         cancelled = true;
     }
+    // Execution thread only: also restore hooks before any surviving callbacks run.
+    void clearCancel();
     std::function<void(const std::string&)> output;
     std::function<void(const std::string&, const std::string&)> bufferOutput;
     std::function<void()> changed;
@@ -102,6 +104,8 @@ class ScriptSession {
     std::map<int, Buffer> buffers;
     std::vector<Access> accesses;
 
+    std::vector<int> interruptedThreads;
+    void restoreInterruptHooks();
     void initLua();
     void bindTable(int cpu, int domain);
     void bindMethod(const char* name, int cpu = ARM11A, int domain = -1);

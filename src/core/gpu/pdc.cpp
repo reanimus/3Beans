@@ -118,11 +118,6 @@ void Pdc::drawFrame() {
         core.interrupts.sendInterrupt(ARM11, 0x2B);
 
     // Retain one shared snapshot for screenshots; do not copy pixels per vblank.
-    // A stalled presenter must not make the producer repeatedly convert frames.
-    if (!core.bootConfig.headless) {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (buffers.size() == 2) return;
-    }
     // Synchronize only frames that we actually capture (including reused buffers).
     core.gpu.syncRender();
     for (int i = 0; i < 2; i++)
@@ -134,7 +129,7 @@ void Pdc::drawFrame() {
 
     std::lock_guard<std::mutex> lock(mutex);
     latest = buffer;
-    if (!core.bootConfig.headless) buffers.push(buffer);
+    if (!core.bootConfig.headless && buffers.size() < 2) buffers.push(buffer);
 
 }
 

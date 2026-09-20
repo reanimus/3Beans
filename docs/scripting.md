@@ -29,7 +29,9 @@ Without `--headless`, scripts run on the desktop emulation thread. `emu:resume()
 continuous desktop execution after the current script returns. Scripts and GUI input
 are serialized. Commands queued while a script runs execute after it returns. Pause/Restart/Stop
 queue behind the script. Cancel interrupts the active script and discards previously
-queued script commands; new commands can run afterward. Keep automation loops bounded when using the desktop.
+queued script commands; new commands can run afterward. Settings dialogs queue at a
+worker boundary, pause emulation while open, and restore the previous run state on
+close. A running script must finish or be cancelled before its queued dialog opens. Keep automation loops bounded when using the desktop.
 
 `--config-dir DIR` selects the settings directory. Otherwise 3Beans uses `3beans.ini`
 in the working directory if present, then the platform's application settings directory.
@@ -85,8 +87,8 @@ Stepping advances the shared scheduler: other CPUs and devices can progress befo
 selected CPU's next instruction. While a halted selected CPU waits for its host-time deadline, other CPUs, devices,
 and frame callbacks continue to advance. Halted CPUs time out; ARM11C/D are unavailable in Old
 3DS mode. `runFrame()` starts explicit execution even if paused. Screenshots require a
-completed captured frame and do not consume the desktop presentation queue. A desktop
-presenter that falls behind may skip captures; headless captures occur every frame.
+completed captured frame and do not consume the desktop presentation queue. Captures
+remain current even if the desktop presenter falls behind.
 
 ```lua
 local id = callbacks:add('frame', function()
@@ -185,7 +187,9 @@ failures. `console:createBuffer([name])` creates a named monospace text buffer w
 `print`, `clear`, `setSize(cols, rows)`, `moveCursor(x, y)`, `advance(columns)`, `setName`,
 `getX`, `getY`, `cols`, and `rows` methods. Buffers wrap and scroll within their bounds;
 headless output includes text snapshots. Buffer names must be unique. A completely
-filled buffer scrolls only when another character or cursor advance needs space.
+filled buffer scrolls only when another character or cursor advance needs space. At
+exact fill, `(getX(), getY())` is `(0, rows())`, a pending-wrap position beyond the
+last visible row. `moveCursor` accepts only visible positions and cancels that wrap.
 
 Savestates, graphical overlays, sockets, persistent script storage, platform-specific
 GB/GBA peripherals, and full mGBA script compatibility are not included.

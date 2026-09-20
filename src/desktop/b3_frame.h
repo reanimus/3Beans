@@ -60,7 +60,9 @@ private:
     std::mutex queueMutex;
     std::condition_variable queueReady;
     std::deque<std::function<void()>> commands;
-    std::atomic<bool> workerStop{false};
+    std::atomic<bool> workerStop{false}, settingsOpen{false};
+    bool settingsPending = false;
+    void showSettings(std::function<void()> dialog);
     std::atomic<bool> uiCore{false}, uiOverrides{false};
     std::atomic<int> uiFps{0};
     wxFrame *scriptWindow = nullptr;
