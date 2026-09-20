@@ -30,6 +30,9 @@ public:
 
     void updateMcuRam();
     void mcuInterrupt(uint32_t mask);
+    void initFirmLcd();
+    void resetLcd();
+    bool lcdPowered(int i) const;
 
     uint8_t readBusData(int i) { return i2cBusData[i]; }
     uint8_t readBusCnt(int i) { return i2cBusCnt[i]; }
@@ -53,6 +56,14 @@ private:
     uint32_t mcuIrqMask = 0;
     uint8_t mcuRamIdx = 0;
     uint8_t mcuRamData[0xC8] = {};
+    uint8_t mcuLcdState = 0; // MCU 0x0F bits 5:7: bottom/top backlight, panel voltage
+    struct Lcd {
+        uint8_t power = 0, status = 1, reset = 0, readAddr = 0;
+        bool readData = false;
+    } lcd[2];
+
+    uint8_t readLcd(int i);
+    void writeLcd(int i, uint8_t value);
 
     uint8_t readMcu();
     void writeMcu(uint8_t value);

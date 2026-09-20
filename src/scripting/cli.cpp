@@ -6,9 +6,10 @@
 
 LaunchOptions launchOptions;
 const char* commandHelp() {
-    return "Usage: 3beans [--headless] [--script file.lua] [--sd image] [--nand image]\n"
+    return "Usage: 3beans [--headless] [--script file.lua] [--firm homebrew.firm] [--sd image] [--nand image]\n"
            "              [--boot9 file] [--boot11 file] [--timeout seconds] [--config-dir directory]\n"
            "Scripts run in order. Headless scripts explicitly start and advance emulation.\n"
+           "--firm selects direct homebrew boot; desktop starts it automatically without scripts.\n"
            "Boot paths override saved settings for this process only, taking effect on start/reset.\n";
 }
 void LaunchOptions::parse(int argc, char** argv) {
@@ -23,7 +24,7 @@ void LaunchOptions::parse(int argc, char** argv) {
             continue;
         }
         if (arg != "--script" && arg != "--sd" && arg != "--nand" && arg != "--boot9" && arg != "--boot11" &&
-            arg != "--timeout" && arg != "--config-dir")
+            arg != "--firm" && arg != "--timeout" && arg != "--config-dir")
             throw std::runtime_error("Unknown option: " + arg);
         if (++i == argc)
             throw std::runtime_error("Missing value for " + arg);

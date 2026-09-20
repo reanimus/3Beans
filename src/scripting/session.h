@@ -136,6 +136,7 @@ class ScriptSession {
         getX,
         getY,
         loadFile,
+        loadFirm,
         log,
         moveCursor,
         name,

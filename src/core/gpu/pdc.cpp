@@ -17,6 +17,7 @@
     along with 3Beans. If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include <algorithm>
 #include <cstring>
 #include "../core.h"
 
@@ -42,6 +43,17 @@ void Pdc::drawScreen(int i, uint32_t *buffer) {
     // Draw a screen's framebuffer in the selected format if enabled
     if (~pdcInterruptType[i] & BIT(0)) return;
     int width = (i ? 320 : 400);
+    // LCD power/blanking sits after the framebuffer scanout. PWM duty is kept
+    // for guest readback; calibrated luminance and adaptive backlight are not
+    // modeled, but disabled PWM or zero duty must blank the panel.
+    bool lit = lcdReset && !(lcdSignal & BIT(i * 16)) && core.i2c.lcdPowered(i) &&
+        (lcdPwm[i] & BIT(16)) && lcdBrightness[i];
+    if (!lit || (lcdFill[i] & BIT(24))) {
+        uint32_t color = 0xFF000000 | (lit ? lcdFill[i] & 0xFFFFFF : 0);
+        for (int y = 0; y < 240; ++y)
+            std::fill(buffer + y * 400, buffer + y * 400 + width, color);
+        return;
+    }
     switch (pdcFramebufFormat[i] & 0x7) {
     case 0: // RGBA8
         for (int y = 0; y < 240; y++) {
@@ -107,6 +119,33 @@ void Pdc::drawScreen(int i, uint32_t *buffer) {
         }
         return;
     }
+}
+
+void Pdc::writeLcdSignal(uint32_t mask, uint32_t value) {
+    mask &= 0x10001;
+    lcdSignal = (lcdSignal & ~mask) | (value & mask);
+}
+
+void Pdc::writeLcdReset(uint32_t mask, uint32_t value) {
+    mask &= 1;
+    lcdReset = (lcdReset & ~mask) | (value & mask);
+    if ((mask & 1) && !lcdReset) core.i2c.resetLcd();
+}
+
+void Pdc::writeLcdFill(int i, uint32_t mask, uint32_t value) {
+    mask &= 0x1FFFFFF;
+    lcdFill[i] = (lcdFill[i] & ~mask) | (value & mask);
+}
+
+void Pdc::writeLcdBrightness(int i, uint32_t mask, uint32_t value) {
+    mask &= 0x3FF;
+    lcdBrightness[i] = (lcdBrightness[i] & ~mask) | (value & mask);
+}
+
+void Pdc::writeLcdPwm(int i, uint32_t mask, uint32_t value) {
+    // Preserve the New 3DS extension bits too; only PWM enable affects scanout.
+    mask &= core.n3dsMode ? 0xFFFFF3FF : 0x7F3FF;
+    lcdPwm[i] = (lcdPwm[i] & ~mask) | (value & mask);
 }
 
 void Pdc::drawFrame() {

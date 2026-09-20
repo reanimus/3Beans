@@ -1,5 +1,6 @@
 #include "session.h"
 #include "../core/core.h"
+#include "../core/firm.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -66,7 +67,7 @@ int cpuByName(const std::string& name) {
     throw std::runtime_error("Unknown CPU: " + name);
 }
 void validPathName(const std::string& name) {
-    if (name != "sd" && name != "nand" && name != "boot9" && name != "boot11")
+    if (name != "sd" && name != "nand" && name != "boot9" && name != "boot11" && name != "firm")
         throw std::runtime_error("Unknown boot path: " + name);
 }
 void readable(const std::string& path, bool writable, size_t minimum = 0) {
@@ -136,12 +137,13 @@ std::map<std::string, std::string> ScriptSession::paths(const std::string& kind)
         if (!core)
             return {};
         const BootConfig& b = core->bootConfig;
-        return {{"sd", b.sd}, {"nand", b.nand}, {"boot9", b.boot9}, {"boot11", b.boot11}};
+        return {{"sd", b.sd}, {"nand", b.nand}, {"boot9", b.boot9}, {"boot11", b.boot11},
+            {"firm", b.firm ? b.firm->path : ""}};
     }
     std::map<std::string, std::string> result = {{"sd", Settings::sdPath},
                                                  {"nand", Settings::nandPath},
                                                  {"boot9", Settings::boot9Path},
-                                                 {"boot11", Settings::boot11Path}};
+                                                 {"boot11", Settings::boot11Path}, {"firm", ""}};
     if (kind == "effective")
         for (auto& entry : overrides)
             result[entry.first] = entry.second;
@@ -184,6 +186,7 @@ void ScriptSession::start(bool reset) {
     config.nand = p["nand"];
     config.boot9 = p["boot9"];
     config.boot11 = p["boot11"];
+    if (!p["firm"].empty()) config.firm = std::make_shared<FirmImage>(p["firm"]);
     config.headless = headless;
     config.forceSoftware = headless || !context;
     config.audioPacing = !headless;
@@ -205,7 +208,7 @@ void ScriptSession::start(bool reset) {
     std::fill_n(skipPending, MAX_CPUS, false);
     accesses.clear();
     stepCpu = -1;
-    paused = true;
+    pause();
     attach();
     if (changed)
         changed();
@@ -438,6 +441,8 @@ const char* ScriptSession::methodName(Method method) {
         return "getY";
     case Method::loadFile:
         return "loadFile";
+    case Method::loadFirm:
+        return "loadFirm";
     case Method::log:
         return "log";
     case Method::moveCursor:
@@ -579,6 +584,7 @@ void ScriptSession::initLua() {
                              "clearPathOverride",
                              "getPaths",
                              "loadFile",
+                             "loadFirm",
                              "setKeys",
                              "addKeys",
                              "clearKeys",
@@ -1052,6 +1058,19 @@ int ScriptSession::dispatch(Method method, int cpu, int domain) {
             start(true);
         } catch (...) {
             cartPath = previous;
+            throw;
+        }
+        lua_pushboolean(lua, true);
+        return 1;
+    }
+    if (method == Method::loadFirm) {
+        requireOutsideCallback();
+        auto previous = overrides;
+        setPath("firm", str(lua, 2));
+        try {
+            start(true);
+        } catch (...) {
+            overrides = std::move(previous);
             throw;
         }
         lua_pushboolean(lua, true);

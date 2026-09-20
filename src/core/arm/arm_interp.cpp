@@ -47,8 +47,12 @@ ArmInterp::ArmInterp(Core &core, CpuId id): core(core), id(id) {
 
 void ArmInterp::init() {
     // Prepare to execute the boot ROM
-    setCpsr(0xD3); // Supervisor, interrupts off
-    registersUsr[15] = (id == ARM9) ? 0xFFFF0000 : 0x10000;
+    init((id == ARM9) ? 0xFFFF0000 : 0x10000, 0xD3);
+}
+
+void ArmInterp::init(uint32_t entry, uint32_t status) {
+    setCpsr(status);
+    registersUsr[15] = entry;
     flushPipeline();
 }
 

@@ -42,7 +42,7 @@ working directory.
 
 ## Temporary boot paths
 
-CLI options `--sd`, `--nand`, `--boot9`, and `--boot11` set session overrides before scripts
+CLI options `--sd`, `--nand`, `--boot9`, `--boot11`, and `--firm` set session overrides before scripts
 load. Lua can change or clear them:
 
 ```lua
@@ -54,7 +54,7 @@ emu:clearPathOverride('sd')
 emu:reset()  -- now uses the saved SD path
 ```
 
-Names are `sd`, `nand`, `boot9`, and `boot11`. `getPaths()` returns `saved`, `effective`
+Names are `sd`, `nand`, `boot9`, `boot11`, and `firm`. `getPaths()` returns `saved`, `effective`
 (next boot), and `mounted` tables; `mounted` is empty without a core. Overrides are
 resolved to absolute paths when supplied, validated, and checked again before reboot.
 Preflight validation failure preserves the current core. A later construction failure
@@ -65,8 +65,94 @@ Changing a path never hot-swaps an image. Overrides survive emulator resets, scr
 reloads, and scripting-environment resets, until explicitly cleared or process exit.
 Saved Path Settings still edits the persistent values. The title indicates active
 overrides; saving settings never persists those overrides. The images themselves retain
-normal writable behavior. FIRM files boot through the normal firmware/SD boot chain;
-there is no direct FIRM loader.
+normal writable behavior. `firm` is always empty in `saved`; it has no persistent setting.
+
+## Direct homebrew FIRM loading
+
+Load a host build directly without copying it into your SD image:
+
+```sh
+3beans --firm build/my-homebrew.firm --sd test.img
+```
+
+On desktop, this starts the FIRM automatically when no `--script` is supplied.
+**System → Restart** rereads the FIRM file, so rebuilding and restarting is sufficient
+to test the next version. Boot ROM paths still come from saved settings or `--boot9`
+and `--boot11`. The SD/NAND images remain available to the payload as storage.
+
+For automated tests:
+
+```sh
+3beans --headless --firm build/my-homebrew.firm --sd test.img --script test.lua --timeout 60
+```
+
+```lua
+emu:start()  -- loads the --firm selection, initially paused
+for i = 1, 120 do emu:runFrame() end
+emu:screenshot('ui.png')
+emu:loadFirm('build/another.firm')  -- selects and boots immediately, initially paused
+emu:reset()                       -- rereads that same host file
+emu:clearPathOverride('firm')
+emu:reset()                       -- returns to the normal boot-ROM/SD/NAND boot chain
+```
+
+`emu:setPathOverride('firm', path)` selects the next boot without replacing the current
+core. `emu:loadFirm(path)` also reboots, returns true on success, and restores the previous
+selection on failure. Header, range, entrypoint, overlap, and SHA-256 checks happen before
+the current core is destroyed. Clearing the override does not reboot until requested.
+The FIRM selection survives Stop, emulator resets, and Reset scripting, and never enters
+`3beans.ini`. A failed rebuild or truncated FIRM leaves the current core available.
+
+This is a homebrew handoff, with these conventions:
+
+- Unencrypted FIRM sections load into ARM9 RAM (first 1 MiB), VRAM, DSP/AXI WRAM,
+  or the first 128 MiB of FCRAM. Section offsets/sizes use 512-byte alignment and
+  destinations use 4-byte alignment. RSA signatures are not required.
+- ARM9 starts in supervisor mode with IRQ/FIQ disabled and MPU/caches disabled.
+  ITCM/DTCM are enabled; `r0` is argc, `r1` points to argv in the `0x01FF8000` ITCM
+  mirror, and `r2` is `0xBEEF`. `argv[0]` is the conventional `sdmc:/boot.firm` name;
+  it does **not** create a file on the SD or expose the host path to the guest filesystem.
+- FIRM header byte `0x10`, bit 0 requests initialized BGR8 framebuffers. When set,
+  argc is 2 and `argv[1]` describes two framebuffer sets at `0x18300000`/`0x18400000`,
+  with bottom screens at `+0x46500`. GPU engines are enabled (`CFG11_GPU_CNT = 0x1007F`)
+  for fills and copies as well as display output. LCD controllers are out of reset,
+  signals are routed, PWM is enabled at Luma's default brightness, and MCU panel and
+  backlight rails are on. Boot power operations are complete with no stale completion
+  interrupts. Otherwise argc is 1 and GPU/LCD setup belongs to the payload. Sections
+  must not overlap requested framebuffers.
+- ARM11A starts at its entrypoint with MMU/caches and interrupts disabled. A zero
+  entrypoint leaves it polling `0x1FFFFFFC`, allowing ARM9 to launch it later. The top
+  1 KiB of AXI WRAM is reserved for this handoff.
+  Both ARM and Thumb entrypoints are supported; ARM9 must have a nonzero entrypoint.
+- ARM11B (core 1) starts in standby with interrupts masked in CPSR, its interrupt
+  interface enabled, and the global distributor enabled. To launch it, write an ARM
+  or Thumb entrypoint to `0x1FFFFFDC` and send SGI 1 to core 1. A mailbox write alone,
+  an unrelated interrupt, or a zero entrypoint does not launch it. The boot SGI remains
+  pending for the payload to acknowledge, as with boot11. On New 3DS, cores 2/3 remain
+  powered off until the payload starts them through the normal hardware registers.
+- Both 64 KiB boot ROM dumps are still required: payloads such as GodMode9 call
+  unprotected boot-ROM routines. Protected halves are locked at handoff. Direct loading
+  skips boot-ROM execution and does not reproduce its AES key setup, OTP caches, or the
+  entire hardware state left by boot9strap. NAND decryption and payloads relying on that
+  state may require normal boot instead. This does not add Horizon or GBA-mode support.
+
+The ABI follows [boot9strap's chainloader](https://github.com/SciresM/boot9strap/blob/934e10092a9caab0dbc83038449878862b7fc7f7/stage2/arm9/source/chainloader.c)
+and [entry handoff](https://github.com/SciresM/boot9strap/blob/934e10092a9caab0dbc83038449878862b7fc7f7/stage2/arm9/source/chainloader_entry.s).
+Automated tests cover synthetic payloads on Old and New 3DS, delayed ARM11 launch,
+core 1 mailbox/SGI handoff (including ARM/Thumb, early interrupts, null entrypoints,
+and reset), GPU fills/copies, framebuffer output, rebuilding/reset, malformed files,
+and returning to normal boot. They also cover
+the fixed ARM11 interrupt-controller aliases used by GodMode9 during LCD initialization
+and reading an SD card with its default block length, as open_agb_firm does.
+LCD reset, signal blanking, color fill, PWM enable/zero duty, controller power, and
+MCU backlight power affect captured and displayed output. LCD I2C reads use address/data
+pairs via register `0x40`; the controllers report revision 1. MCU power changes complete
+synchronously. Analog startup delays, calibrated luminance, and adaptive backlight
+processing are not modeled.
+GodMode9 v2.2.3 (20260331144941) has been checked on macOS for direct boot, browsing
+the SD card, and resetting. open_agb_firm nightly `401c3dff900f658d3edf77ababcfaf5dca54a0a8`
+has been checked for reaching its file selector, navigating directories, and resetting.
+These checks do not establish full crypto/NAND functionality or GBA game support.
 
 ## Execution and events
 
@@ -81,6 +167,7 @@ there is no direct FIRM loader.
 | `emu:currentFrame()` / `currentCycle()` | Frame and master-clock counts since boot/reset |
 | `emu:frequency()` / `frameCycles()` | Master clock frequency and integer cycles per frame |
 | `emu:loadFile(path)` | Select a cartridge and reboot; returns true |
+| `emu:loadFirm(path)` | Select a host homebrew FIRM and reboot; returns true |
 | `emu:screenshot(path)` | Write the latest completed combined 400×480 display as PNG |
 
 Stepping advances the shared scheduler: other CPUs and devices can progress before the

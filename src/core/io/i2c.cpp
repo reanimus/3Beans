@@ -49,6 +49,27 @@ void I2c::mcuInterrupt(uint32_t mask) {
         core.interrupts.sendInterrupt(ARM11, 0x71);
 }
 
+void I2c::resetLcd() {
+    // The external reset pin resets the controllers, not the MCU power rails.
+    for (auto &panel : lcd) panel = Lcd();
+}
+
+void I2c::initFirmLcd() {
+    // Completed Luma-style screen setup. Boot-time power events have already
+    // been consumed; do not inject stale interrupts into the payload.
+    mcuLcdState = 0xE0;
+    for (auto &panel : lcd) {
+        panel.power = 0x10;
+        panel.status = 0;
+        panel.reset = 0xAA;
+    }
+}
+
+bool I2c::lcdPowered(int i) const {
+    uint8_t rails = BIT(7) | BIT(i ? 5 : 6);
+    return (mcuLcdState & rails) == rails && lcd[i].power == 0x10;
+}
+
 uint8_t I2c::readMcu() {
     // Get the MCU address and increment if enabled
     uint8_t address = regAddrs[1];
@@ -59,7 +80,7 @@ uint8_t I2c::readMcu() {
         case 0x00: return 0x13; // Version high
         case 0x01: return 0x41; // Version low
         case 0x0B: return 0x64; // Battery percent
-        case 0x0F: return 0x02; // Power flags
+        case 0x0F: return 0x02 | mcuLcdState; // Shell open and LCD power status
         case 0x10: return readMcuIrqFlags(0);
         case 0x11: return readMcuIrqFlags(1);
         case 0x12: return readMcuIrqFlags(2);
@@ -68,6 +89,7 @@ uint8_t I2c::readMcu() {
         case 0x19: return readMcuIrqMask(1);
         case 0x1A: return readMcuIrqMask(2);
         case 0x1B: return readMcuIrqMask(3);
+        case 0x22: return 0; // LCD power requests complete synchronously
         case 0x30: return readMcuRtcVal(0);
         case 0x31: return readMcuRtcVal(1);
         case 0x32: return readMcuRtcVal(2);
@@ -159,13 +181,54 @@ void I2c::writeMcuIrqMask(int i, uint8_t value) {
 }
 
 void I2c::writeMcuLcdPower(uint8_t value) {
-    // Fake LCD power control by simply firing interrupts
-    if (value & BIT(0)) mcuInterrupt(BIT(24) | BIT(26) | BIT(28)); // Power off
-    if (value & BIT(1)) mcuInterrupt(BIT(25)); // LCD power on
-    if (value & BIT(2)) mcuInterrupt(BIT(26)); // Bottom backlight off
-    if (value & BIT(3)) mcuInterrupt(BIT(27)); // Bottom backlight on
-    if (value & BIT(4)) mcuInterrupt(BIT(28)); // Top backlight off
-    if (value & BIT(5)) mcuInterrupt(BIT(29)); // Top backlight on
+    // Complete the requested rail changes before notifying the guest. Panel
+    // power-off also disables both backlights but emits only its requested IRQ.
+    if (value & BIT(0)) mcuLcdState = 0;
+    if (value & BIT(1)) mcuLcdState |= BIT(7);
+    if (value & BIT(2)) mcuLcdState &= ~BIT(5);
+    if (value & BIT(3)) mcuLcdState |= BIT(5);
+    if (value & BIT(4)) mcuLcdState &= ~BIT(6);
+    if (value & BIT(5)) mcuLcdState |= BIT(6);
+    mcuInterrupt(uint32_t(value & 0x3F) << 24);
+}
+
+uint8_t I2c::readLcd(int i) {
+    // I2CLCD returns (register address, value) pairs, using the auto-incrementing
+    // pointer set through register 0x40 rather than the ordinary I2C subaddress.
+    Lcd &panel = lcd[i];
+    panel.readData = !panel.readData;
+    if (panel.readData) return panel.readAddr;
+    switch (panel.readAddr++) {
+        case 0x01: return panel.power;
+        case 0x60: return panel.status;
+        case 0x62: // Ready for backlight enable, not the backlight rail itself.
+            return core.pdc.readLcdReset() && !(core.pdc.readLcdSignal() & BIT(i * 16)) &&
+                (mcuLcdState & BIT(7)) && (panel.power & BIT(4));
+        case 0xFE: return panel.reset;
+        case 0xFF: return 1; // Model a revision-1 controller on each panel.
+        default: return 0;
+    }
+}
+
+void I2c::writeLcd(int i, uint8_t value) {
+    if (writeCounts[1] == 2) {
+        regAddrs[1] = value;
+        return;
+    }
+    uint8_t address = regAddrs[1]++;
+    Lcd &panel = lcd[i];
+    if (address == 0x40) {
+        panel.readAddr = value;
+        panel.readData = false;
+        return;
+    }
+    if (!core.pdc.readLcdReset()) return;
+    switch (address) {
+        case 0x01: panel.power = value & 0x11; break;
+        case 0x60: panel.status = value & 1; break;
+        case 0xFE: panel.reset = value; break;
+        default: break;
+    }
 }
 
 void I2c::writeMcuRamIdx(uint8_t value) {
@@ -227,6 +290,8 @@ void I2c::writeBusCnt(int i, uint8_t value) {
             case 0x079: i2cBusData[i] = readCam(0); return;
             case 0x07B: i2cBusData[i] = readCam(1); return;
             case 0x14B: i2cBusData[i] = readMcu(); return;
+            case 0x12D: i2cBusData[i] = readLcd(0); return;
+            case 0x12F: i2cBusData[i] = readLcd(1); return;
             case 0x179: i2cBusData[i] = readCam(2); return;
 
         default:
@@ -241,6 +306,8 @@ void I2c::writeBusCnt(int i, uint8_t value) {
     i2cBusCnt[i] |= BIT(4); // Acknowledge
     if (++writeCounts[i] == 1) {
         devAddrs[i] = i2cBusData[i];
+        if (i == 1 && (devAddrs[i] == 0x2D || devAddrs[i] == 0x2F))
+            lcd[(devAddrs[i] - 0x2D) / 2].readData = false;
         return;
     }
 
@@ -249,6 +316,8 @@ void I2c::writeBusCnt(int i, uint8_t value) {
         case 0x078: return writeCam(0, i2cBusData[i]);
         case 0x07A: return writeCam(1, i2cBusData[i]);
         case 0x14A: return writeMcu(i2cBusData[i]);
+        case 0x12C: return writeLcd(0, i2cBusData[i]);
+        case 0x12E: return writeLcd(1, i2cBusData[i]);
         case 0x178: return writeCam(2, i2cBusData[i]);
 
     default:

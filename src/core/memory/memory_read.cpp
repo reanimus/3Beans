@@ -24,6 +24,14 @@ template uint16_t Memory::ioRead(CpuId, uint32_t);
 template uint32_t Memory::ioRead(CpuId, uint32_t);
 
 template <typename T> T Memory::ioRead(CpuId id, uint32_t address) {
+    // MPCore exposes fixed CPU-interface aliases as well as the caller's bank
+    // at +0x100 (ARM11 MPCore TRM, table 9-1). The alias selects the target CPU,
+    // including side effects such as interrupt acknowledgement.
+    if (id != ARM9 && address >= 0x17E00200 && address < 0x17E00600) {
+        id = CpuId((address - 0x17E00200) >> 8);
+        address = 0x17E00100 | (address & 0xFF);
+    }
+
     // Mirror the ARM11 DSP register area
     if (id != ARM9 && (address >> 12) == 0x10203)
         address &= 0xFFFFF03F;
@@ -341,6 +349,14 @@ template <typename T> T Memory::ioRead(CpuId id, uint32_t address) {
                 DEF_IO32(0x10200D00, data = core.cdmas[CDMA0].readDbgstatus()) // CDMA0_DBGSTATUS
                 DEF_IO32(0x10200D08, data = core.cdmas[CDMA0].readDbginst0()) // CDMA0_DBGINST0
                 DEF_IO32(0x10200D0C, data = core.cdmas[CDMA0].readDbginst1()) // CDMA0_DBGINST1
+                DEF_IO32(0x1020200C, data = core.pdc.readLcdSignal()) // LCD_SIGNAL
+                DEF_IO32(0x10202014, data = core.pdc.readLcdReset()) // LCD_RESET
+                DEF_IO32(0x10202204, data = core.pdc.readLcdFill(0)) // LCD0_FILL
+                DEF_IO32(0x10202240, data = core.pdc.readLcdBrightness(0)) // LCD0_BRIGHTNESS
+                DEF_IO32(0x10202244, data = core.pdc.readLcdPwm(0)) // LCD0_PWM
+                DEF_IO32(0x10202A04, data = core.pdc.readLcdFill(1)) // LCD1_FILL
+                DEF_IO32(0x10202A40, data = core.pdc.readLcdBrightness(1)) // LCD1_BRIGHTNESS
+                DEF_IO32(0x10202A44, data = core.pdc.readLcdPwm(1)) // LCD1_PWM
                 DEF_IO16(0x10203000, data = core.dsp->readPdata()) // DSP_PDATA
                 DEF_IO16(0x10203008, data = core.dsp->readPcfg()) // DSP_PCFG
                 DEF_IO16(0x1020300C, data = core.dsp->readPsts()) // DSP_PSTS

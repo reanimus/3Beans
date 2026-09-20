@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """CLI integration tests: no console dumps, display, sound device, or third-party Python modules."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import struct
@@ -11,6 +12,23 @@ import zlib
 
 binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else './3beans').resolve())
 source = Path(__file__).resolve().parent
+
+
+def firm_image(sections, arm9=0x08000000, arm11=0x1FF80000, screens=True):
+    header = bytearray(0x200)
+    struct.pack_into('<4sIII', header, 0, b'FIRM', 0, arm11, arm9)
+    header[0x10] = int(screens)
+    payload = bytearray()
+    for i, (address, data) in enumerate(sections):
+        data = data + bytes((-len(data)) % 512)
+        struct.pack_into('<IIII', header, 0x40 + i * 0x30, 0x200 + len(payload), address, len(data), 2)
+        header[0x50 + i * 0x30:0x70 + i * 0x30] = hashlib.sha256(data).digest()
+        payload += data
+    return header + payload
+
+
+def arm_code(*words):
+    return struct.pack('<' + 'I' * len(words), *words)
 
 
 def png_first_pixel(path):
@@ -38,6 +56,39 @@ with tempfile.TemporaryDirectory(prefix='3beans-scripting-') as directory:
     for index, name in ((1, 'override.img'), (2, 'second.img'), (3, 'saved.img'), (2, 'preflight.img')):
         (root / name).write_bytes(struct.pack('<H', index * 0x1111) + bytes(4094))
     (root / 'nand.bin').write_bytes(bytes(0x20000))
+    # Both processors write a marker to shared RAM and park. No console code.
+    arm9 = arm_code(0xE59F3008, 0xE3A04042, 0xE5834000, 0xEAFFFFFE, 0x20001000)
+    arm11 = arm_code(0xE59F3008, 0xE3A04024, 0xE5834000, 0xEAFFFFFE, 0x20001004)
+    firm = firm_image([(0x08000000, arm9), (0x1FF80000, arm11)])
+    (root / 'homebrew.firm').write_bytes(firm)
+    replacement = bytearray(arm9)
+    struct.pack_into('<I', replacement, 4, 0xE3A04043)
+    (root / 'replacement.firm').write_bytes(firm_image([(0x08000000, replacement), (0x1FF80000, arm11)]))
+    (root / 'delayed.firm').write_bytes(firm_image([(0x08000000, arm9), (0x1FF80000, arm11)], arm11=0, screens=False))
+    # Thumb entry on ARM9, shared FCRAM code, and a DSP WRAM ARM11 section.
+    (root / 'thumb.firm').write_bytes(firm_image([(0x20002000, struct.pack('<HH', 0x2445, 0xE7FE)),
+                                               (0x1FF00000, arm11)], arm9=0x20002001, arm11=0x1FF00000))
+    # Separate ARM and Thumb core-1 entries write a shared marker and park.
+    secondary = bytearray(0x12C)
+    secondary[:len(arm11)] = arm11
+    secondary[0x100:0x114] = arm_code(0xE59F3008, 0xE3A04061, 0xE5834000, 0xEAFFFFFE, 0x20001008)
+    secondary[0x120:] = struct.pack('<HHHHI', 0x4B01, 0x2462, 0x601C, 0xE7FE, 0x20001008)
+    (root / 'secondary.firm').write_bytes(firm_image([(0x08000000, arm9), (0x1FF80000, secondary)]))
+    invalid = {'short': b'FIRM', 'hash': firm[:-1] + bytes([firm[-1] ^ 1])}
+    # All structural checks use wide arithmetic and precede core replacement.
+    for name, offset, value in [('magic', 0, 0), ('offset', 0x40, 0xFFFFFF00),
+                                ('size', 0x48, 0xFFFFFF00), ('alignment', 0x44, 0x08000001),
+                                ('mmio', 0x44, 0x10000000), ('wrap', 0x44, 0xFFFFFF00),
+                                ('reserved', 0x74, 0x1FFFFC00), ('copy', 0x4C, 3),
+                                ('entry', 12, 0x08000200), ('noarm9', 12, 0),
+                                ('private', 8, 0x08000000), ('misaligned-entry', 12, 0x08000002),
+                                ('overlap-file', 0x70, 0x200), ('overlap-ram', 0x74, 0x08000000),
+                                ('framebuffers', 0x74, 0x18300000)]:
+        bad = bytearray(firm)
+        struct.pack_into('<I', bad, offset, value)
+        invalid[name] = bad
+    for name, data in invalid.items():
+        (root / (name + '.firm')).write_bytes(data)
     ini = 'sdPath=saved.img\nboot9Path=missing9\nboot11Path=missing11\nnandPath=missingnand\ngpuRenderer=1\nthreadedGpu=1\nfpsLimiter=1\n'
     (root / '3beans.ini').write_text(ini)
     common = ['--headless', '--config-dir', directory, '--boot9', (root / 'boot9.bin').as_posix(),
@@ -56,6 +107,19 @@ with tempfile.TemporaryDirectory(prefix='3beans-scripting-') as directory:
     assert 'integration passed' in run((source / 'integration.lua').read_text(), timeout=60)
     assert png_first_pixel(root / 'red.png') == bytes((255, 0, 0, 255))
     assert png_first_pixel(root / 'green.png') == bytes((0, 255, 0, 255))
+    storage_before = [(root / name).read_bytes() for name in ('override.img', 'nand.bin')]
+    for model in (1, 2): # Old and New 3DS handoffs, independent of NAND detection.
+        model_dir = root / ('model-' + str(model))
+        model_dir.mkdir()
+        model_ini = ini + 'systemType=' + str(model) + '\n'
+        (model_dir / '3beans.ini').write_text(model_ini)
+        (root / 'homebrew.firm').write_bytes(firm) # The reset test replaces this file.
+        assert 'FIRM tests passed' in run((source / 'firm.lua').read_text(),
+                                        extra=['--firm', (root / 'homebrew.firm').as_posix(),
+                                               '--config-dir', str(model_dir)], timeout=60)
+        assert (model_dir / '3beans.ini').read_text() == model_ini, 'Model configuration changed'
+    assert png_first_pixel(root / 'firm-ui.png') == bytes((255, 0, 0, 255))
+    assert storage_before == [(root / name).read_bytes() for name in ('override.img', 'nand.bin')]
     assert 'deliberate failure' in run("error('deliberate failure')", False)
     assert 'stack traceback' in run("local function f() error('trace') end; f()", False)
     assert 'frame failed' in run("emu:start(); callbacks:add('frame', function() error('frame failed') end); emu:runFrame()", False)

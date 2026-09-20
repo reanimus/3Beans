@@ -71,7 +71,8 @@ private:
 
     uint32_t cardStatus = 0;
     uint32_t opCond = 0x80000000;
-    uint32_t blockLen = 0;
+    // Cards power on with a 512-byte block length; CMD16 is optional.
+    uint32_t blockLen = 0x80; // In 32-bit words
     uint32_t curAddress = 0;
     uint16_t curBlock = 0;
 

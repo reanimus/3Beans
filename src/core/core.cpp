@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include "core.h"
+#include "firm.h"
 
 Core::Core(std::string &cartPath, std::function<void()> *contextFunc, const BootConfig &config): bootConfig(config), aes(*this), arms { ArmInterp(*this, ARM11A),
         ArmInterp(*this, ARM11B), ArmInterp(*this, ARM11C), ArmInterp(*this, ARM11D), ArmInterp(*this, ARM9) },
@@ -86,6 +87,7 @@ Core::Core(std::string &cartPath, std::function<void()> *contextFunc, const Boot
     schedule(RESET_CYCLES, 0x7FFFFFFFFFFFFFFF);
     schedule(END_FRAME, 268111856 / 60);
     schedule(CSND_SAMPLE, 2048);
+    if (bootConfig.firm) bootConfig.firm->boot(*this);
 }
 
 Core::~Core() {

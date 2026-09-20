@@ -24,6 +24,13 @@ template void Memory::ioWrite(CpuId, uint32_t, uint16_t);
 template void Memory::ioWrite(CpuId, uint32_t, uint32_t);
 
 template <typename T> void Memory::ioWrite(CpuId id, uint32_t address, T value) {
+    // Fixed MPCore CPU-interface aliases select cores 0-3, independent of the
+    // caller. Homebrew uses these to initialize the interrupt controller.
+    if (id != ARM9 && address >= 0x17E00200 && address < 0x17E00600) {
+        id = CpuId((address - 0x17E00200) >> 8);
+        address = 0x17E00100 | (address & 0xFF);
+    }
+
     // Mirror the ARM11 DSP register area
     if (id != ARM9 && (address >> 12) == 0x10203)
         address &= 0xFFFFF03F;
@@ -424,6 +431,14 @@ template <typename T> void Memory::ioWrite(CpuId id, uint32_t address, T value) 
                 DEF_IO32(0x10200D0C, core.cdmas[CDMA0].writeDbginst1(IO_PARAMS)) // CDMA0_DBGINST1
                 DEF_IO32(0x10200020, core.cdmas[CDMA0].writeInten(IO_PARAMS)) // CDMA0_INTEN
                 DEF_IO32(0x1020002C, core.cdmas[CDMA0].writeIntclr(IO_PARAMS)) // CDMA0_INTCLR
+                DEF_IO32(0x1020200C, core.pdc.writeLcdSignal(IO_PARAMS)) // LCD_SIGNAL
+                DEF_IO32(0x10202014, core.pdc.writeLcdReset(IO_PARAMS)) // LCD_RESET
+                DEF_IO32(0x10202204, core.pdc.writeLcdFill(0, IO_PARAMS)) // LCD0_FILL
+                DEF_IO32(0x10202240, core.pdc.writeLcdBrightness(0, IO_PARAMS)) // LCD0_BRIGHTNESS
+                DEF_IO32(0x10202244, core.pdc.writeLcdPwm(0, IO_PARAMS)) // LCD0_PWM
+                DEF_IO32(0x10202A04, core.pdc.writeLcdFill(1, IO_PARAMS)) // LCD1_FILL
+                DEF_IO32(0x10202A40, core.pdc.writeLcdBrightness(1, IO_PARAMS)) // LCD1_BRIGHTNESS
+                DEF_IO32(0x10202A44, core.pdc.writeLcdPwm(1, IO_PARAMS)) // LCD1_PWM
                 DEF_IO16(0x10203000, core.dsp->writePdata(IO_PARAMS)) // DSP_PDATA
                 DEF_IO16(0x10203004, core.dsp->writePadr(IO_PARAMS)) // DSP_PADR
                 DEF_IO16(0x10203008, core.dsp->writePcfg(IO_PARAMS)) // DSP_PCFG

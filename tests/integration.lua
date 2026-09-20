@@ -121,6 +121,19 @@ callbacks:remove(first)
 assert(emu:runFrame() == 'frame' and frames == 2 and added == 1)
 
 -- Capture a red top screen, then green. Headless presentation must never stall.
+-- These boot programs do not initialize hardware, so power up the LCD explicitly.
+a.physical:write32(0x10202014, 1)
+a.physical:write32(0x1020200C, 0)
+a.physical:write32(0x10202240, 0x5F)
+a.physical:write32(0x10202244, 0x1023E)
+local function i2cWrite(device, reg, value)
+    for _, pair in ipairs({{device, 0x82}, {reg, 0x80}, {value, 0x81}}) do
+        a.physical:write8(0x10144000, pair[1])
+        a.physical:write8(0x10144001, pair[2])
+    end
+end
+i2cWrite(0x2C, 1, 0x10)
+i2cWrite(0x4A, 0x22, 0x22)
 local fb = 0x20040000
 emu:writeRange(fb, string.rep(string.char(255, 0, 0, 255), 400 * 240)) -- RGBA packed framebuffer (alpha, blue, green, red)
 a.physical:write32(0x10400468, fb)

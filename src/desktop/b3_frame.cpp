@@ -168,6 +168,10 @@ b3Frame::b3Frame(): wxFrame(nullptr, wxID_ANY, "3Beans"), session(false), mutex(
     enqueue([this] {
         launchOptions.apply(session);
         for (auto &path : launchOptions.scripts) if (!session.runFile(path)) break;
+        if (launchOptions.scripts.empty() && launchOptions.paths.count("firm")) {
+            session.start();
+            session.resume();
+        }
     });
 }
 

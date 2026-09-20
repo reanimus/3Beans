@@ -53,7 +53,7 @@ void Sha::hash1(uint32_t *src) {
         shaHash[i] += hash[i];
 }
 
-void Sha::hash2(uint32_t *src) {
+void Sha::hash2(uint32_t *src, uint32_t *state) {
     // Define the table of constants used during hashing
     static const uint32_t table[64] = {
         0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5, 0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5,
@@ -75,7 +75,7 @@ void Sha::hash2(uint32_t *src) {
 
     // Use the current hash as a base
     uint32_t hash[8];
-    memcpy(hash, shaHash, sizeof(hash));
+    memcpy(hash, state, sizeof(hash));
 
     // Hash the input based on pseudocode from https://en.wikipedia.org/wiki/SHA-2
     for (int i = 0; i < 64; i++) {
@@ -96,7 +96,35 @@ void Sha::hash2(uint32_t *src) {
 
     // Apply the hash
     for (int i = 0; i < 8; i++)
-        shaHash[i] += hash[i];
+        state[i] += hash[i];
+}
+
+std::array<uint8_t, 32> Sha::digest256(const uint8_t *data, size_t size) {
+    uint32_t state[8] = {0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+        0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19};
+    uint64_t bits = uint64_t(size) * 8;
+    auto block = [&](const uint8_t *bytes) {
+        uint32_t words[64];
+        for (int i = 0; i < 16; ++i)
+            words[i] = (uint32_t(bytes[i * 4]) << 24) | (uint32_t(bytes[i * 4 + 1]) << 16) |
+                (uint32_t(bytes[i * 4 + 2]) << 8) | bytes[i * 4 + 3];
+        hash2(words, state);
+    };
+    while (size >= 64) {
+        block(data);
+        data += 64;
+        size -= 64;
+    }
+    uint8_t tail[128] = {};
+    if (size) memcpy(tail, data, size);
+    tail[size] = 0x80;
+    size_t padded = size < 56 ? 64 : 128;
+    for (int i = 0; i < 8; ++i) tail[padded - 1 - i] = bits >> (i * 8);
+    block(tail);
+    if (padded == 128) block(tail + 64);
+    std::array<uint8_t, 32> result;
+    for (int i = 0; i < 32; ++i) result[i] = state[i / 4] >> (24 - (i % 4) * 8);
+    return result;
 }
 
 void Sha::initFifo() {
@@ -187,7 +215,7 @@ void Sha::update() {
         if (shaCnt & BIT(5)) // SHA1
             hash1(src);
         else // SHA256/SHA224
-            hash2(src);
+            hash2(src, shaHash);
     }
 
     // Set or clear SHA in DRQs based on CPU type

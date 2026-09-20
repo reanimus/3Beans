@@ -36,6 +36,17 @@ public:
     std::vector<uint32_t> latestFrame();
     void drawFrame();
 
+    uint32_t readLcdSignal() { return lcdSignal; }
+    uint32_t readLcdReset() { return lcdReset; }
+    uint32_t readLcdFill(int i) { return lcdFill[i]; }
+    uint32_t readLcdBrightness(int i) { return lcdBrightness[i]; }
+    uint32_t readLcdPwm(int i) { return lcdPwm[i]; }
+    void writeLcdSignal(uint32_t mask, uint32_t value);
+    void writeLcdReset(uint32_t mask, uint32_t value);
+    void writeLcdFill(int i, uint32_t mask, uint32_t value);
+    void writeLcdBrightness(int i, uint32_t mask, uint32_t value);
+    void writeLcdPwm(int i, uint32_t mask, uint32_t value);
+
     uint32_t readFramebufLt0(int i) { return pdcFramebufLt0[i]; }
     uint32_t readFramebufLt1(int i) { return pdcFramebufLt1[i]; }
     uint32_t readFramebufFormat(int i) { return pdcFramebufFormat[i]; }
@@ -58,6 +69,11 @@ private:
     std::atomic<bool> ready{false};
     std::mutex mutex;
     uint32_t screenBases[2] = {};
+    uint32_t lcdSignal = 0x10001;
+    uint32_t lcdReset = 0;
+    uint32_t lcdFill[2] = {};
+    uint32_t lcdBrightness[2] = {};
+    uint32_t lcdPwm[2] = {};
 
     uint32_t pdcFramebufLt0[2] = {};
     uint32_t pdcFramebufLt1[2] = {};

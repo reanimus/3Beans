@@ -33,6 +33,7 @@ public:
 
     ArmInterp(Core &core, CpuId id);
     void init();
+    void init(uint32_t entry, uint32_t status);
     uint32_t debugPc() const { return *registers[15] - ((cpsr & BIT(5)) ? 2 : 4); }
     uint32_t debugReadRegister(const std::string &name) const;
     void debugWriteRegister(const std::string &name, uint32_t value);

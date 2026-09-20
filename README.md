@@ -71,6 +71,12 @@ Scripts explicitly call `emu:start()` and `emu:runFrame()`. Returning exits head
 uncaught errors and timeouts return a nonzero status. Boot-path overrides apply on the next
 start/reset and never replace saved settings. The mounted images remain writable.
 
+For homebrew bringup, `3beans --firm build/payload.firm --sd test-sd.img` loads the
+host FIRM directly. Restart rereads the file after each rebuild; the SD image needs
+no payload update. Lua provides `emu:loadFirm(path)` and a temporary `firm` path
+override. Boot ROM dumps are still required. See [the handoff and compatibility
+limits](docs/scripting.md#direct-homebrew-firm-loading).
+
 `nix build` builds the application and runs the scripting tests. `make test` also runs the
 synthetic firmware tests directly (requires Python 3). When using a Git checkout, add new
 source files to Git before `nix build`, or use `nix build path:.` to include untracked files.

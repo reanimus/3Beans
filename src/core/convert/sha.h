@@ -20,6 +20,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
+#include <array>
 #include <queue>
 
 class Core;
@@ -30,6 +32,8 @@ public:
 
     Sha(Core &core, bool arm9): core(core), arm9(arm9) {}
     void update();
+    // Host-side hashing shares the compression function, without touching device state.
+    static std::array<uint8_t, 32> digest256(const uint8_t *data, size_t size);
 
     uint32_t readCnt() { return shaCnt; }
     uint32_t readBlkcnt() { return shaBlkcnt; }
@@ -57,7 +61,7 @@ private:
     uint32_t shaHash[8] = {};
 
     void hash1(uint32_t *src);
-    void hash2(uint32_t *src);
+    static void hash2(uint32_t *src, uint32_t *state);
 
     void initFifo();
     void pushFifo();
